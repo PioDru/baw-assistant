@@ -6,8 +6,6 @@ from __future__ import annotations
 
 import streamlit as st
 
-import logging
-
 from baw_assistant import db, kb
 from baw_assistant.config import get_settings
 from baw_assistant.data_generator import generate
@@ -18,18 +16,17 @@ from ui import agents_page, analytics_page, assistant_page, monitoring_page, tea
 st.set_page_config(page_title="Asystent BAW", page_icon=":material/smart_toy:", layout="wide")
 
 
-@st.cache_resource(show_spinner="Przygotowuję dane syntetyczne i bazę wiedzy…")
-def ensure_data() -> dict:
+@st.cache_resource(show_spinner="Przygotowuję dane syntetyczne…")
+def ensure_data() -> bool:
     if not db.database_ready():
         generate()
-    try:
-        return {"kb_chunks": kb.ensure_index(), "kb_error": None}
-    except Exception as exc:  # aplikacja działa bez bazy wiedzy (agenci pomijają te fakty)
-        logging.getLogger(__name__).warning("Baza wiedzy niedostępna: %s", exc)
-        return {"kb_chunks": 0, "kb_error": str(exc)}
+    return True
 
 
-boot = ensure_data()
+ensure_data()
+# Baza wiedzy: przy każdym odświeżeniu (tanio po sukcesie); gdy Qdrant był niedostępny, ponawia indeksowanie.
+kb.ensure_ready()
+kb_state = kb.status()
 settings = get_settings()
 
 with st.sidebar:
@@ -68,8 +65,11 @@ with st.sidebar:
                    "Sprawdź OPENAI_API_KEY i LLM_MODEL w pliku .env.", icon=":material/warning:")
     st.caption(f"Symulowany czas: {settings.sim_now:%d.%m.%Y %H:%M}")
     st.caption("Langfuse: " + ("włączony" if settings.langfuse_enabled else "wyłączony"))
-    st.caption(f"Baza wiedzy (Qdrant, {kb.embedding_mode()}): "
-               + (f"{boot['kb_chunks']} sekcji" if not boot["kb_error"] else "niedostępna"))
+    if kb_state["points"]:
+        st.caption(f"Baza wiedzy (Qdrant, {kb_state['mode']}): {kb_state['points']} sekcji")
+    else:
+        st.warning(f"Baza wiedzy pusta lub niedostępna ({kb_state['url']}). Agenci działają bez niej; "
+                   "ponowię indeksowanie automatycznie.", icon=":material/database_off:")
     st.caption("Widoczne strony i zakres danych agentów zależą od wybranej roli.")
 
 nav.run()

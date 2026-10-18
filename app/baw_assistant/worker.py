@@ -33,15 +33,16 @@ def drain_queue() -> None:
 
 def main() -> None:
     generate()                      # dane syntetyczne, jeśli jeszcze ich nie ma
-    try:
-        log.info("Baza wiedzy: zindeksowano sekcje: %s", kb.ensure_index())
-    except Exception as exc:        # Qdrant może startować dłużej – wyszukiwanie zwróci wtedy pustą listę
-        log.warning("Indeksowanie bazy wiedzy nie powiodło się: %s", exc)
+    try:                            # czeka na Qdrant do ok. 2 min (kontener może startować dłużej)
+        log.info("Baza wiedzy: zindeksowano sekcje: %s", kb.ensure_index(attempts=60, delay=2))
+    except Exception as exc:        # kolejne próby wykonuje zadanie „kb” co minutę
+        log.warning("Indeksowanie bazy wiedzy nie powiodło się, ponowię za minutę: %s", exc)
     interval = int(os.getenv("SCAN_INTERVAL_MIN", db.get_setting("scan_interval_min")))
     poll = int(os.getenv("QUEUE_POLL_SECONDS", "15"))
     scheduler = BlockingScheduler(timezone="Europe/Warsaw")
     scheduler.add_job(enqueue_scan, "interval", minutes=interval, id="scan")
     scheduler.add_job(drain_queue, "interval", seconds=poll, id="queue", max_instances=1, coalesce=True)
+    scheduler.add_job(kb.ensure_ready, "interval", minutes=1, id="kb", max_instances=1, coalesce=True)
     log.info("Worker uruchomiony: skan co %s min, kolejka co %s s", interval, poll)
     enqueue_scan()
     scheduler.start()

@@ -120,3 +120,29 @@ def test_disabled_agent(fresh_db):
     assert diag["agents"] == ["Agent Instancji"]       # opcjonalny agent pominięty, odpowiedź działa
     db.set_agent_enabled("Agent Analityk", True)
     db.set_agent_enabled("Agent Monitor", True)
+
+
+def test_kb_self_heals_after_collection_loss(monkeypatch):
+    monkeypatch.setattr(kb, "RETRY_EVERY_S", 0)
+    kb.client().delete_collection(kb.collection_name())
+    kb.search("ecm-gateway", kind="runbook", role="admin")          # pierwsza próba wykrywa brak kolekcji
+    assert kb.search("Connection refused ecm-gateway", kind="runbook", role="admin")
+    assert kb.status()["points"] == len(kb.load_chunks())
+
+
+def test_openai_embedding_failure_falls_back_to_local(monkeypatch):
+    def broken():
+        raise RuntimeError("brak dostępu do API embeddingów")
+    monkeypatch.setenv("EMBEDDING_MODEL", "openai")
+    monkeypatch.setattr(kb, "_openai_embedder", broken)
+    try:
+        assert kb.ensure_index(attempts=1) == len(kb.load_chunks())
+        assert kb.embedding_mode() == "hash"
+    finally:
+        kb._mode_override = None
+
+
+def test_unreachable_qdrant_raises_clear_error(monkeypatch):
+    monkeypatch.setattr(kb, "client", lambda: (_ for _ in ()).throw(ConnectionError("refused")))
+    with pytest.raises(ConnectionError, match="Qdrant niedostępny"):
+        kb.wait_for_qdrant(attempts=2, delay=0)

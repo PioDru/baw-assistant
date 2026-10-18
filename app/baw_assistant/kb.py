@@ -14,6 +14,7 @@ import logging
 import math
 import os
 import re
+import time
 import unicodedata
 import uuid
 from functools import lru_cache
@@ -50,7 +51,15 @@ def load_chunks() -> list[dict[str, Any]]:
 
 # --- embeddingi ----------------------------------------------------------------------
 
+_mode_override: str | None = None   # ustawiane, gdy embeddingi OpenAI zawiodą (przejście na tryb lokalny)
+_index_ready = False
+_last_attempt = 0.0
+RETRY_EVERY_S = 30   # przy niedostępnym Qdrant kolejna próba najwcześniej po tylu sekundach
+
+
 def embedding_mode() -> str:
+    if _mode_override:
+        return _mode_override
     mode = os.getenv("EMBEDDING_MODEL", "auto")
     if mode == "auto":
         return "hash" if get_settings().mock_llm or not os.getenv("OPENAI_API_KEY") else "openai"
@@ -103,17 +112,51 @@ def client():
         return QdrantClient(":memory:")
     if url.startswith("local:"):
         return QdrantClient(path=url.removeprefix("local:"))
-    return QdrantClient(url=url, timeout=5)
+    # check_compatibility=False: bez mylącego ostrzeżenia, gdy serwer jeszcze startuje (klient 1.19 działa z 1.18)
+    return QdrantClient(url=url, timeout=5, check_compatibility=False)
 
 
-def ensure_index() -> int:
-    """Tworzy kolekcję (jeśli brak) i wgrywa sekcje dokumentów. Idempotentne: stałe identyfikatory punktów."""
+def wait_for_qdrant(attempts: int = 30, delay: float = 2.0) -> None:
+    """Czeka, aż Qdrant przyjmie połączenia (kontener może startować dłużej niż aplikacja)."""
+    last: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            client().get_collections()
+            return
+        except Exception as exc:
+            last = exc
+            if attempt < attempts:
+                log.info("Qdrant jeszcze niedostępny (%s/%s): %s", attempt, attempts, exc)
+                time.sleep(delay)
+    raise ConnectionError(f"Qdrant niedostępny pod {get_settings().qdrant_url}: {last}")
+
+
+def _embed_chunks(chunks: list[dict]) -> list[list[float]]:
+    global _mode_override
+    texts = [f"{c['title']} – {c['section']}: {c['text']}" for c in chunks]
+    try:
+        return embed(texts)
+    except Exception as exc:
+        if embedding_mode() != "openai":
+            raise
+        log.warning("Embeddingi OpenAI niedostępne (%s) – przechodzę na lokalne embeddingi (hash).", exc)
+        _mode_override = "hash"
+        return embed(texts)
+
+
+def ensure_index(attempts: int = 30, delay: float = 2.0) -> int:
+    """Tworzy kolekcję (jeśli brak) i wgrywa sekcje dokumentów. Idempotentne: stałe identyfikatory punktów.
+
+    Ponawia połączenie z Qdrant (attempts × delay) i przy błędzie embeddingów OpenAI przechodzi na tryb lokalny.
+    """
+    global _index_ready
     from qdrant_client import models
 
     chunks = load_chunks()
+    wait_for_qdrant(attempts, delay)
     qc = client()
+    vectors = _embed_chunks(chunks)
     name = collection_name()
-    vectors = embed([f"{c['title']} – {c['section']}: {c['text']}" for c in chunks])
     if not qc.collection_exists(name):
         qc.create_collection(name, vectors_config=models.VectorParams(size=len(vectors[0]),
                                                                        distance=models.Distance.COSINE))
@@ -122,8 +165,41 @@ def ensure_index() -> int:
                 qc.create_payload_index(name, field, models.PayloadSchemaType.KEYWORD)
     points = [models.PointStruct(id=str(uuid.uuid5(NAMESPACE, f"{c['doc']}#{c['section']}")), vector=v, payload=c)
               for c, v in zip(chunks, vectors)]
-    qc.upsert(name, points=points)
+    qc.upsert(name, points=points, wait=True)
+    _index_ready = True
+    log.info("Baza wiedzy: kolekcja %s, punkty: %s", name, len(points))
     return len(points)
+
+
+def ensure_ready() -> bool:
+    """Leniwe samonaprawianie: jeśli kolekcji brak (np. Qdrant wystartował później), indeksuje ją raz."""
+    global _index_ready, _last_attempt
+    if _index_ready:
+        return True
+    if time.monotonic() - _last_attempt < RETRY_EVERY_S:
+        return False
+    _last_attempt = time.monotonic()
+    try:
+        if client().collection_exists(collection_name()) and status()["points"] >= len(load_chunks()):
+            _index_ready = True
+        else:
+            ensure_index(attempts=1)
+    except Exception as exc:
+        log.warning("Baza wiedzy niedostępna: %s", exc)
+    return _index_ready
+
+
+def status() -> dict[str, Any]:
+    """Stan bazy wiedzy (do UI i diagnostyki)."""
+    info: dict[str, Any] = {"url": get_settings().qdrant_url, "collection": collection_name(),
+                            "mode": embedding_mode(), "points": 0, "error": None}
+    try:
+        qc = client()
+        if qc.collection_exists(info["collection"]):
+            info["points"] = qc.count(info["collection"], exact=True).count
+    except Exception as exc:
+        info["error"] = str(exc)
+    return info
 
 
 def search(query: str, *, kind: str | None = None, process_id: str | None = None, role: str | None = None,
@@ -131,6 +207,8 @@ def search(query: str, *, kind: str | None = None, process_id: str | None = None
     """Wyszukiwanie semantyczne z filtrem metadanych. Błąd Qdrant = pusta lista (agent działa dalej)."""
     from qdrant_client import models
 
+    if not ensure_ready():
+        return []
     try:
         must = []
         if kind:
@@ -145,6 +223,8 @@ def search(query: str, *, kind: str | None = None, process_id: str | None = None
                                        limit=limit, with_payload=True, score_threshold=threshold)
         return [{**p.payload, "score": round(p.score, 3)} for p in result.points]
     except Exception as exc:
+        global _index_ready
+        _index_ready = False          # np. kolekcję usunięto – następna próba zindeksuje ją ponownie
         log.warning("Baza wiedzy niedostępna: %s", exc)
         return []
 
@@ -160,3 +240,17 @@ def short(text: str, limit: int = 240) -> str:
         return text
     cut = text[:limit]
     return cut[: cut.rfind(".") + 1] if "." in cut else cut + "…"
+
+
+def main() -> None:
+    """python -m baw_assistant.kb – ręczne zindeksowanie bazy wiedzy i wypisanie stanu."""
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    try:
+        ensure_index()
+    except Exception as exc:
+        log.error("Indeksowanie nie powiodło się: %s", exc)
+    print(status())
+
+
+if __name__ == "__main__":
+    main()

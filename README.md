@@ -102,9 +102,9 @@ a panel boczny pokazuje ostrzeżenie.
 cd app && pytest -q          # albo: docker compose exec app pytest -q
 ```
 
-48 testów w trybie mock, z Qdrant w pamięci:
+51 testów w trybie mock, z Qdrant w pamięci:
 - `golden_questions.yaml`: 18 pytań ze znaną odpowiedzią dla 4 ról (intencja, decyzja, agenci, werdykt, wymagane fakty) i kryterium trafności routingu ≥ 90%;
-- `test_v2_agents.py`: KPI kontra surowe dane, alerty i progi, deduplikacja powiadomień, zdarzenia UCA/EDA, zatwierdzanie i odrzucanie akcji, filtr roli w bazie wiedzy, wyłączanie agentów;
+- `test_v2_agents.py`: KPI kontra surowe dane, alerty i progi, deduplikacja powiadomień, zdarzenia UCA/EDA, zatwierdzanie i odrzucanie akcji, filtr roli w bazie wiedzy, ponawianie i samonaprawianie indeksu Qdrant, wyłączanie agentów;
 - `test_verifier_and_llm_path.py`: grounding, poprawka i blokada halucynacji, uprawnienia odporne na błędną klasyfikację modelu (model zastąpiony atrapą);
 - `test_tools_and_rbac.py`: narzędzia odczytu i widoczność spraw dla ról.
 
@@ -126,6 +126,22 @@ app/
     data_generator.py, db.py, tools.py, rbac.py, llm.py, tracing.py
   tests/
 ```
+
+## Baza wiedzy (Qdrant) – sprawdzenie i rozwiązywanie problemów
+
+Kolekcja `baw_knowledge_hash` (embeddingi lokalne) albo `baw_knowledge_openai` powstaje automatycznie:
+worker indeksuje ją przy starcie, czekając na Qdrant do około 2 minut, i ponawia próbę co minutę;
+aplikacja też ponawia indeksowanie (najwyżej co 30 s), dopóki kolekcji brak. Przy błędzie embeddingów
+OpenAI indeksowanie przechodzi na embeddingi lokalne.
+
+```bash
+curl -s localhost:6333/collections                         # lista kolekcji
+docker compose logs worker | grep -i "baza wiedzy"          # przebieg indeksowania
+docker compose exec app python -m baw_assistant.kb          # ręczne zindeksowanie + stan
+```
+
+Panel boczny aplikacji pokazuje liczbę sekcji w bazie wiedzy albo ostrzeżenie, gdy jest pusta.
+Rozwiązanie sprawdzono z serwerem Qdrant 1.18.0 i klientem `qdrant-client` 1.19.1.
 
 ## Kolejne etapy
 
