@@ -1,0 +1,1 @@
+"""Strony aplikacji Streamlit."""

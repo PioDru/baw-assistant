@@ -1,0 +1,148 @@
+# Zestaw pytań testowych ze znaną odpowiedzią (scenariusze zaszyte w danych syntetycznych).
+# Każdy przypadek: kto pyta, w jakim kontekście, jaka powinna być intencja, decyzja Dyspozytora,
+# werdykt Weryfikatora i jakie fakty muszą (lub nie mogą) pojawić się w odpowiedzi.
+
+- name: pracownik – dlaczego sprawa stoi (scenariusz REK-2026-0412)
+  user: u_anna
+  role: pracownik
+  context: REK-2026-0412
+  question: Dlaczego ta sprawa stoi od 4 dni? Co mam zrobić dalej?
+  intent: instance_diagnosis
+  decision: route
+  verdict: ok
+  must_contain: ["Protokół szkody", "21.10.2026", "brak ostrzeżeń i błędów", "Przygotuj przypomnienie do klienta"]
+
+- name: pracownik – dokumenty w sprawie
+  user: u_anna
+  role: pracownik
+  context: REK-2026-0412
+  question: Jakie dokumenty są już w sprawie?
+  intent: instance_details
+  decision: route
+  verdict: ok
+  must_contain: ["Formularz reklamacji", "Zdjęcia uszkodzenia", "Brakujące dokumenty: Protokół szkody"]
+
+- name: pracownik – kto zajmował się sprawą (numer w pytaniu)
+  user: u_anna
+  role: pracownik
+  context: null
+  question: Kto zajmował się sprawą REK-2026-0412?
+  intent: instance_details
+  decision: route
+  verdict: ok
+  must_contain: ["Anna Kowalska"]
+
+- name: pracownik – moje pilne sprawy (przeciążony Jan Mazur)
+  user: u_jan
+  role: pracownik
+  context: null
+  question: Co mam pilnego?
+  intent: my_work
+  decision: route
+  verdict: ok
+  must_contain: ["po terminie SLA: 3", "REK-2026-0377", "REK-2026-0381", "REK-2026-0390"]
+
+- name: pracownik – sprawa kolegi (brak uprawnień)
+  user: u_anna
+  role: pracownik
+  context: null
+  question: Dlaczego REK-2026-0377 stoi?
+  intent: instance_diagnosis
+  decision: refuse
+  verdict: refused
+  must_contain: ["Brak uprawnień"]
+  must_not_contain: ["Opinia techniczna"]
+
+- name: pracownik – sprawy całego działu (brak uprawnień)
+  user: u_anna
+  role: pracownik
+  context: null
+  question: Pokaż sprawy całego działu
+  intent: team_overview
+  decision: refuse
+  verdict: refused
+  must_contain: ["nie ma dostępu"]
+
+- name: pracownik – pytanie poza zakresem
+  user: u_anna
+  role: pracownik
+  context: null
+  question: Napisz wiersz o kotach
+  intent: out_of_scope
+  decision: refuse
+  verdict: refused
+
+- name: pracownik – diagnoza bez wybranej sprawy
+  user: u_anna
+  role: pracownik
+  context: null
+  question: Dlaczego to stoi?
+  intent: instance_diagnosis
+  decision: need_context
+  verdict: info
+
+- name: kierownik – sprawa podwładnego czekająca na dział techniczny
+  user: u_marek
+  role: kierownik
+  context: REK-2026-0377
+  question: Dlaczego ta sprawa stoi?
+  intent: instance_diagnosis
+  decision: route
+  verdict: ok
+  must_contain: ["Dział techniczny", "przekroczony", "Wyślij monit do działu realizującego zadanie"]
+
+- name: kierownik – sprawa innego zespołu (brak uprawnień)
+  user: u_marek
+  role: kierownik
+  context: null
+  question: Jaki jest status FAK-2026-1162?
+  intent: instance_diagnosis
+  decision: refuse
+  verdict: refused
+
+- name: kierownik – obciążenie zespołu (Agent Analityk, PoC v2)
+  user: u_marek
+  role: kierownik
+  context: null
+  question: Kto ma najwięcej przeterminowanych zadań w zespole?
+  intent: team_overview
+  decision: not_available
+  verdict: info
+  must_contain: ["PoC v2"]
+
+- name: właściciel procesu – wąskie gardła (Agent Analityk, PoC v2)
+  user: u_ewa
+  role: wlasciciel
+  context: null
+  question: Jakie są wąskie gardła procesu reklamacji?
+  intent: process_analytics
+  decision: not_available
+  verdict: info
+
+- name: administrator – sprawa zatrzymana przez awarię
+  user: u_tomasz
+  role: admin
+  context: null
+  question: Dlaczego REK-2026-0419 stoi?
+  intent: instance_diagnosis
+  decision: route
+  verdict: ok
+  must_contain: ["błąd techniczny", "18.10.2026 10:24", "Zgłoś incydent techniczny administratorowi"]
+
+- name: administrator – stan platformy (Agent Monitor, PoC v2)
+  user: u_tomasz
+  role: admin
+  context: null
+  question: Jaki jest stan platformy, są jakieś awarie?
+  intent: platform_status
+  decision: not_available
+  verdict: info
+
+- name: nieistniejąca sprawa
+  user: u_tomasz
+  role: admin
+  context: null
+  question: Dlaczego REK-2026-9999 stoi?
+  intent: instance_diagnosis
+  decision: not_found
+  verdict: info
