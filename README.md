@@ -1,53 +1,58 @@
-# Asystent operacyjny IBM BAW – PoC v1 (MVP)
+# Asystent operacyjny IBM BAW – PoC v2
 
-Pierwsza wersja systemu wieloagentowego z dokumentu projektowego: etapy 0–3, czyli pełny łańcuch
-dla pracownika. Dyspozytor rozpoznaje pytanie i sprawdza uprawnienia, Agent Instancji zbiera fakty
-o sprawie, a Redaktor-Weryfikator kontroluje odpowiedź, zanim trafi do użytkownika.
-Dane są syntetyczne, bez połączenia z IBM BAW.
+System 5 współpracujących agentów AI z dokumentu projektowego, etapy 0–6: wszystkie 4 role
+(pracownik, kierownik, właściciel procesu, administrator) oraz tryb systemowy (zdarzenia UCA, EDA
+i harmonogram). Dane są syntetyczne, bez połączenia z IBM BAW.
 
 ```
-Użytkownik ─► Streamlit ─► Dyspozytor ──► Agent Instancji ──► Redaktor-Weryfikator ─► odpowiedź + źródła + ślad
-                              │  (intencja, uprawnienia)   (fakty z SQLite)  ▲ │ (grounding, uprawnienia)
-                              │                                 └─ poprawka ─┘ │
-                              └── odmowa / brak kontekstu / funkcja PoC v2 ────┘
+                 ┌────────────────────────── LangGraph ───────────────────────────┐
+Pytanie (UI) ──► │ Dyspozytor ─┬─► Agent Instancji ─┐                              │
+Zdarzenie    ──► │ (intencja,  ├─► Agent Analityk ──┼─► Redaktor-Weryfikator ─► [powiadomienia]
+(kolejka)        │  uprawnienia)└─► Agent Monitor ──┘   (składa, weryfikuje)      │
+                 └────────────────────────────────────────────────────────────────┘
+                 SQLite (dane, kolejka, ślad) · Qdrant (baza wiedzy) · GPT-6 Luna · Langfuse
+Akcja sugerowana ──► przygotowanie treści ─► interrupt() ─► Zatwierdź / Odrzuć ─► powiadomienie (symulacja)
 ```
 
-## Co działa w PoC v1
+## Co zawiera PoC v2
 
-| Element | Zakres |
-| --- | --- |
-| Dane syntetyczne | 3 procesy, ~590 instancji z historią, zadaniami, dokumentami i logami; scenariusze ze znaną odpowiedzią |
-| Streamlit | wybór roli i użytkownika (symulacja logowania), menu zależne od roli, czat w kontekście instancji, źródła, panel „Jak powstała odpowiedź” |
-| Dyspozytor | intencja przez LLM (structured output) albo reguły; uprawnienia zawsze w kodzie; odmowy, prośba o kontekst, informacja o funkcjach PoC v2 |
-| Agent Instancji | diagnoza sprawy, szczegóły (dokumenty, historia, osoby), przegląd moich spraw, statystyka podobnych spraw, akcje sugerowane |
-| Redaktor-Weryfikator | każda liczba, data, godzina i numer sprawy musi wystąpić w faktach; odnośniki [F#]; jedna poprawka, potem blokada tekstu modelu |
-| Obserwowalność | ślad agentów w UI i w tabeli `agent_runs`; pełne ślady i koszty w Langfuse |
-| Pozostałe strony | Pulpit zespołu, Analityka procesu, Centrum monitoringu: surowe dane (agenci Analityk i Monitor w PoC v2) |
+| Etap | Element | Zakres |
+| --- | --- | --- |
+| 0–3 | Dyspozytor, Agent Instancji, Redaktor-Weryfikator | intencje (LLM lub reguły), uprawnienia w kodzie, fakty o sprawach, grounding odpowiedzi |
+| 4 | Agent Analityk | KPI w pandas: obciążenie zespołu, SLA, czasy w krokach, wąskie gardła, kanały zgłoszeń; rekomendacje; Pulpit zespołu i Analityka procesu z raportem AI |
+| 5 | Agent Monitor + kolejka zdarzeń | alerty z logów, kolejek, danych i SLA (deduplikowane), diagnoza z bazy wiedzy; zdarzenia UCA/EDA/harmonogram; worker z APScheduler; powiadomienia: zadanie BAW, e-mail, Teams (symulowane) |
+| 6 | Człowiek w pętli, Qdrant, rejestr agentów | akcje sugerowane z `interrupt()` i checkpointerem SQLite; baza wiedzy (opisy procesów, instrukcje incydentów) z filtrowaniem po roli; włączanie agentów, statystyki, ślad przebiegów |
 
-Akcje sugerowane są widoczne, ale nieaktywne: zatwierdzanie przez człowieka (`interrupt()`) to etap 6.
+**Zasady z dokumentu projektowego:**
+- liczby liczy kod (pandas, SQL), a model tylko je opisuje;
+- Redaktor-Weryfikator sprawdza, czy każda liczba, data, godzina i numer sprawy w odpowiedzi ma pokrycie w faktach;
+- agenci mają tylko odczyt, poza powiadomieniami; akcje są sugerowane i wymagają zatwierdzenia;
+- uprawnienia sprawdza kod, nigdy model.
 
 ## Szybki start (Docker Compose)
 
-Wymagania: Docker z Compose v2; dla pełnego stosu z Langfuse (ClickHouse, Postgres, Redis, MinIO) przydziel Dockerowi co najmniej 8 GB RAM.
+Wymagania: Docker z Compose v2. Dla pełnego stosu z Langfuse (ClickHouse, Postgres, Redis, MinIO)
+przydziel Dockerowi co najmniej 8 GB RAM.
 
 ```bash
 cp .env.example .env          # uzupełnij OPENAI_API_KEY (albo ustaw LLM_MODEL=mock)
 docker compose up -d --build
 ```
 
-| Usługa | Adres |
+| Usługa | Adres / rola |
 | --- | --- |
-| Aplikacja | http://localhost:8501 |
-| Langfuse | http://localhost:3000 (login: `admin@baw.local` / `baw-admin-123`, zmienisz w `.env`) |
-| Qdrant | http://localhost:6333/dashboard (używany od etapu 6) |
+| `app` | http://localhost:8501 – Streamlit |
+| `worker` | harmonogram skanów (co 5 min) i przetwarzanie kolejki zdarzeń (co 15 s) |
+| `qdrant` | http://localhost:6333/dashboard – baza wiedzy agentów |
+| `langfuse-web` | http://localhost:3000 – ślady i koszty (login: `admin@baw.local` / `baw-admin-123`) |
 
-Tylko aplikacja, bez Langfuse i Qdrant:
+Bez Langfuse:
 
 ```bash
-LANGFUSE_ENABLED=false docker compose up -d --build app
+LANGFUSE_ENABLED=false docker compose up -d --build app worker qdrant
 ```
 
-Dane syntetyczne powstają przy pierwszym starcie w wolumenie `app_data`. Ponowne wygenerowanie:
+Ponowne wygenerowanie danych syntetycznych:
 
 ```bash
 docker compose exec app python -m baw_assistant.data_generator --force
@@ -59,74 +64,72 @@ docker compose exec app python -m baw_assistant.data_generator --force
 cd app
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-export LLM_MODEL=mock LANGFUSE_ENABLED=false   # albo OPENAI_API_KEY=... dla GPT-6 Luna
+export LLM_MODEL=mock LANGFUSE_ENABLED=false QDRANT_URL=local:./data/qdrant
 python -m baw_assistant.data_generator
-streamlit run streamlit_app.py
+streamlit run streamlit_app.py            # w drugim terminalu opcjonalnie: python -m baw_assistant.worker
 ```
 
-## Model LLM
+Bez workera kolejkę przetwarza przycisk „Przetwórz kolejkę” w Centrum monitoringu.
+Lokalny Qdrant (`local:` lub `":memory:"`) obsługuje tylko jeden proces – z workerem uruchom serwer:
+`docker compose up -d qdrant` i `QDRANT_URL=http://localhost:6333`.
 
-Domyślnie `openai:gpt-6-luna` przez LangChain `init_chat_model`. Inny model to zmiana jednej zmiennej:
+## Konfiguracja modeli
 
-| `LLM_MODEL` | Działanie |
+| Zmienna | Wartości |
 | --- | --- |
-| `openai:gpt-6-luna` | GPT-6 Luna przez API OpenAI (wymaga `OPENAI_API_KEY`) |
-| `openai:openai/gpt-6-luna` + `OPENAI_BASE_URL=https://openrouter.ai/api/v1` | ten sam model przez OpenRouter |
-| `mock` | bez LLM: reguły i szablony, do testów i demo offline |
+| `LLM_MODEL` | `openai:gpt-6-luna` (domyślnie), `openai:openai/gpt-6-luna` + `OPENAI_BASE_URL=https://openrouter.ai/api/v1`, `mock` (bez LLM) |
+| `EMBEDDING_MODEL` | `auto` (OpenAI `text-embedding-3-small`, gdy jest klucz; inaczej lokalny embedding haszujący), `openai`, `hash` |
 
-Gdy modelu nie da się użyć (brak klucza, błąd sieci), agenci automatycznie przechodzą na reguły
-i szablony, a panel boczny pokazuje ostrzeżenie. Zasada projektowa: liczby i daty zawsze liczy kod,
-a model tylko je opisuje.
+Gdy modelu nie da się użyć (brak klucza, błąd sieci), agenci przechodzą na reguły i szablony,
+a panel boczny pokazuje ostrzeżenie.
 
 ## Scenariusze demo
 
-| Rola i użytkownik | Kontekst | Pytanie | Oczekiwany wynik |
+| Rola | Gdzie | Co zrobić | Wynik |
 | --- | --- | --- | --- |
-| Pracownik, Anna Kowalska | REK-2026-0412 | Dlaczego ta sprawa stoi? Co mam zrobić dalej? | czeka na protokół szkody od klienta, brak błędów technicznych, akcja „Przygotuj przypomnienie” |
-| Pracownik, Anna Kowalska | — | Dlaczego REK-2026-0377 stoi? | odmowa: sprawa kolegi |
-| Pracownik, Anna Kowalska | — | Pokaż sprawy całego działu | odmowa: brak dostępu do przeglądu zespołu |
-| Pracownik, Jan Mazur | — | Co mam pilnego? | 3 sprawy po terminie SLA |
-| Kierownik, Marek Nowak | REK-2026-0377 | Dlaczego ta sprawa stoi? | czeka na dział techniczny, termin przekroczony |
-| Kierownik, Marek Nowak | — | Kto ma najwięcej przeterminowanych zadań? | informacja: Agent Analityk w PoC v2 |
-| Administrator | — | Dlaczego REK-2026-0419 stoi? | błąd techniczny repozytorium dokumentów z 18.10.2026 10:24 |
+| Pracownik (Anna Kowalska) | Asystent, sprawa REK-2026-0412 | „Dlaczego ta sprawa stoi?” | Instancji i Monitor pracują równolegle: brak protokołu szkody, brak błędów, opis kroku z bazy wiedzy |
+| Pracownik | ta sama odpowiedź | kliknij „Przygotuj przypomnienie do klienta” | treść do edycji → Zatwierdź → e-mail w historii powiadomień |
+| Pracownik | Asystent | „Dlaczego REK-2026-0377 stoi?” | odmowa: sprawa kolegi |
+| Kierownik (Marek Nowak) | Pulpit zespołu | wykres obciążenia, „Kto ma najwięcej przeterminowanych zadań?” | Jan Mazur, 3 sprawy czekają na dział techniczny; akcja „Zaproponuj przesunięcie spraw” |
+| Właściciel procesu (Ewa Wiśniewska) | Analityka procesu | „Generuj raport AI” | wąskie gardło „Weryfikacja dokumentów”, braki dokumentów częstsze w kanale telefonicznym, rekomendacje |
+| Administrator | Centrum monitoringu | „Uruchom skan teraz” | alert krytyczny awarii repozytorium dokumentów z diagnozą z instrukcji, powiadomienia (zadanie BAW, e-mail, Teams) |
+| Administrator | Centrum monitoringu | wstrzyknij „EDA · nowa wersja dokumentu” i przetwórz | Agent Instancji stwierdza komplet dokumentów, Anna dostaje powiadomienie w Teams i zadanie w BAW |
+| Administrator | Zarządzanie agentami | wyłącz Agenta Analityka | kierownik dostaje komunikat „agent wyłączony”; wyłączenie Monitora tylko pomija go w diagnozie |
 
 ## Testy
 
 ```bash
-cd app && pytest -q
-# albo w kontenerze:
-docker compose exec app pytest -q
+cd app && pytest -q          # albo: docker compose exec app pytest -q
 ```
 
-- `tests/golden_questions.yaml`: zestaw pytań ze znaną odpowiedzią (intencja, decyzja, werdykt, wymagane fakty);
-- `test_routing_accuracy_meets_target`: kryterium akceptacji, trafność routingu ≥ 90%;
-- `test_verifier_and_llm_path.py`: grounding, odrzucanie halucynacji, poprawka i blokada, odporność uprawnień
-  na błędną klasyfikację modelu (model zastąpiony atrapą);
-- `test_tools_and_rbac.py`: liczby z narzędzi kontra dane z generatora, widoczność spraw dla ról.
+48 testów w trybie mock, z Qdrant w pamięci:
+- `golden_questions.yaml`: 18 pytań ze znaną odpowiedzią dla 4 ról (intencja, decyzja, agenci, werdykt, wymagane fakty) i kryterium trafności routingu ≥ 90%;
+- `test_v2_agents.py`: KPI kontra surowe dane, alerty i progi, deduplikacja powiadomień, zdarzenia UCA/EDA, zatwierdzanie i odrzucanie akcji, filtr roli w bazie wiedzy, wyłączanie agentów;
+- `test_verifier_and_llm_path.py`: grounding, poprawka i blokada halucynacji, uprawnienia odporne na błędną klasyfikację modelu (model zastąpiony atrapą);
+- `test_tools_and_rbac.py`: narzędzia odczytu i widoczność spraw dla ról.
 
 ## Struktura
 
 ```
-docker-compose.yml        aplikacja + Qdrant + Langfuse (web, worker, Postgres, ClickHouse, Redis, MinIO)
-.env.example              konfiguracja
+docker-compose.yml          app, worker, Qdrant, Langfuse (web, worker, Postgres, ClickHouse, Redis, MinIO)
 app/
-  streamlit_app.py        wejście: role, nawigacja
-  ui/                     strony: Asystent, Pulpit, Analityka, Monitoring, Agenci
+  streamlit_app.py          wejście: role, nawigacja, start bazy wiedzy
+  ui/                       Asystent, Pulpit zespołu, Analityka procesu, Centrum monitoringu, Zarządzanie agentami
+  knowledge/                baza wiedzy (Markdown → Qdrant): opisy procesów, instrukcje incydentów
   baw_assistant/
-    data_generator.py     dane syntetyczne i scenariusze testowe
-    db.py, tools.py       SQLite i narzędzia odczytu (docelowo BAW REST API)
-    rbac.py               uprawnienia ról
-    llm.py, tracing.py    model (init_chat_model) i Langfuse
-    graph.py              graf LangGraph
-    agents/               dispatcher, instance_agent, editor_verifier
+    graph.py                graf LangGraph (pytania i zdarzenia)
+    agents/                 dispatcher, instance_agent, analyst_agent, monitor_agent, editor_verifier, notifier
+    analytics.py            KPI (pandas)          monitoring.py   reguły alertów
+    events.py               kolejka zdarzeń       notifications.py  powiadomienia (symulacja)
+    actions.py              akcje z interrupt()   kb.py           Qdrant i embeddingi
+    worker.py               harmonogram (APScheduler)
+    data_generator.py, db.py, tools.py, rbac.py, llm.py, tracing.py
   tests/
 ```
 
-## Kolejne etapy (z dokumentu projektowego)
+## Kolejne etapy
 
-4. Agent Analityk: KPI w pandas, Pulpit zespołu i Analityka procesu z raportem AI.
-5. Agent Monitor: kolejka zdarzeń UCA/EDA, harmonogram, alerty, historia powiadomień.
-6. Akcje sugerowane z `interrupt()` (człowiek w pętli), statystyki agentów, Qdrant (dokumentacja, incydenty, podobne sprawy).
-
-Następnie JEV / BALAS, integracja z BAW na Cloud Pak (REST API, Kafka, UCA), prawdziwe powiadomienia
-(zadanie BAW, e-mail, Teams) i osadzenie czatu w Coach UI.
+- JEV / BALAS jako filtry wejścia i wyjścia oraz testy odporności agentów.
+- Integracja z BAW na Cloud Pak: REST API zamiast SQLite, Kafka zamiast kolejki w SQLite, UCA w obu kierunkach.
+- Prawdziwe kanały powiadomień: zadania w BAW, SMTP, webhook Teams.
+- Automatyzacja wybranych, bezpiecznych akcji; osadzenie czatu w Coach UI; logowanie SSO/LDAP.

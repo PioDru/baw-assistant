@@ -48,6 +48,27 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, user_id TEXT, role TEXT,
     question TEXT, intent TEXT, path TEXT, verdict TEXT, latency_ms INTEGER, answer TEXT
 );
+CREATE TABLE IF NOT EXISTS event_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, source TEXT NOT NULL, type TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'Oczekuje', routed_to TEXT,
+    result TEXT, processed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, fingerprint TEXT UNIQUE NOT NULL,
+    event_ts TEXT NOT NULL, priority TEXT NOT NULL, category TEXT NOT NULL, component TEXT,
+    description TEXT NOT NULL, diagnosis TEXT, suggested_action TEXT, evidence TEXT,
+    channels_json TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'Nowy'
+);
+CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, channel TEXT NOT NULL, recipient TEXT NOT NULL,
+    subject TEXT NOT NULL, body TEXT NOT NULL, origin TEXT, status TEXT NOT NULL DEFAULT 'Symulowane'
+);
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS agent_config (name TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS action_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, thread_id TEXT, user_id TEXT, action TEXT,
+    instance_id TEXT, status TEXT, channel TEXT, recipient TEXT, text TEXT
+);
 CREATE INDEX IF NOT EXISTS ix_instances_assignee ON instances(assignee_id);
 CREATE INDEX IF NOT EXISTS ix_instances_team ON instances(team_id);
 CREATE INDEX IF NOT EXISTS ix_tasks_instance ON tasks(instance_id);
@@ -65,8 +86,11 @@ def db_path() -> Path:
 def connect(path: Path | None = None) -> Iterator[sqlite3.Connection]:
     p = path or db_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(p)
+    conn = sqlite3.connect(p, timeout=10)
     conn.row_factory = sqlite3.Row
+    # WAL: aplikacja i worker harmonogramu korzystają z tej samej bazy jednocześnie.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
     try:
         yield conn
         conn.commit()
@@ -86,6 +110,48 @@ def query(sql: str, params: tuple | dict = ()) -> list[dict[str, Any]]:
 def query_one(sql: str, params: tuple | dict = ()) -> dict[str, Any] | None:
     rows = query(sql, params)
     return rows[0] if rows else None
+
+
+def execute(sql: str, params: tuple | dict = ()) -> int:
+    """Zapis; zwraca id ostatnio wstawionego wiersza."""
+    with connect() as conn:
+        init_schema(conn)
+        cur = conn.execute(sql, params)
+        return cur.lastrowid
+
+
+def now_iso() -> str:
+    """Czas rzeczywisty dla zapisów operacyjnych (kolejka, alerty, powiadomienia)."""
+    return datetime.now().isoformat(timespec="seconds")
+
+
+DEFAULT_SETTINGS = {
+    "integration_errors_15min": "2",
+    "queue_delay_s": "300",
+    "step_growth_pct": "50",
+    "slow_response_warnings_24h": "5",
+    "scan_interval_min": "5",
+}
+
+
+def get_setting(key: str) -> str:
+    row = query_one("SELECT value FROM settings WHERE key = ?", (key,))
+    return row["value"] if row else DEFAULT_SETTINGS[key]
+
+
+def set_setting(key: str, value: str) -> None:
+    execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, str(value)))
+
+
+def agent_enabled(name: str) -> bool:
+    row = query_one("SELECT enabled FROM agent_config WHERE name = ?", (name,))
+    return bool(row["enabled"]) if row else True
+
+
+def set_agent_enabled(name: str, enabled: bool) -> None:
+    execute("INSERT INTO agent_config (name, enabled) VALUES (?, ?) "
+            "ON CONFLICT(name) DO UPDATE SET enabled = excluded.enabled", (name, int(enabled)))
 
 
 def database_ready() -> bool:

@@ -1,12 +1,12 @@
-# Asystent operacyjny IBM BAW – infrastruktura lokalna PoC v1
+# Asystent operacyjny IBM BAW – infrastruktura lokalna PoC v2
 #
-#   docker compose up -d --build         # całość: aplikacja + Qdrant + Langfuse
-#   LANGFUSE_ENABLED=false docker compose up -d --build app   # tylko aplikacja, bez Langfuse i Qdrant
+#   docker compose up -d --build         # całość: aplikacja + worker + Qdrant + Langfuse
+#   LANGFUSE_ENABLED=false docker compose up -d --build app worker qdrant   # bez Langfuse
 #
 # Adresy po starcie:
 #   Aplikacja Streamlit  http://localhost:8501
 #   Langfuse             http://localhost:3000   (login z .env: LANGFUSE_INIT_USER_EMAIL / _PASSWORD)
-#   Qdrant (dashboard)   http://localhost:6333/dashboard   – używany od etapu 6 PoC
+#   Qdrant (dashboard)   http://localhost:6333/dashboard
 #
 # Hasła i klucze mają wartości domyślne do pracy lokalnej – zmień je w .env, jeśli
 # udostępniasz środowisko poza swoim komputerem.
@@ -53,7 +53,7 @@ x-langfuse-depends: &langfuse-depends
     condition: service_healthy
 
 services:
-  # --- Aplikacja: Streamlit + LangGraph (Dyspozytor, Agent Instancji, Redaktor-Weryfikator) ---
+  # --- Aplikacja: Streamlit + LangGraph (5 agentów) ---
   app:
     build: ./app
     restart: unless-stopped
@@ -62,22 +62,48 @@ services:
     env_file:
       - path: .env
         required: false
-    environment:
+    environment: &app-env
       DB_PATH: /data/baw.db
       LLM_MODEL: ${LLM_MODEL:-openai:gpt-6-luna}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-auto}
       SIM_NOW: ${SIM_NOW:-2026-10-18T10:45:00}
       QDRANT_URL: http://qdrant:6333
       LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-true}
       LANGFUSE_BASE_URL: http://langfuse-web:3000
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-lf-baw-local}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-baw-local}
+    depends_on:
+      qdrant:
+        condition: service_started
     volumes:
       - app_data:/data
 
-  # --- Baza wektorowa (etap 6: dokumentacja procesów, incydenty, podobne sprawy) ---
+  # --- Worker trybu systemowego: harmonogram skanów (APScheduler) i kolejka zdarzeń UCA/EDA ---
+  worker:
+    build: ./app
+    restart: unless-stopped
+    command: ["worker"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      <<: *app-env
+      SCAN_INTERVAL_MIN: ${SCAN_INTERVAL_MIN:-5}
+      QUEUE_POLL_SECONDS: ${QUEUE_POLL_SECONDS:-15}
+    healthcheck:
+      disable: true
+    depends_on:
+      app:
+        condition: service_healthy   # aplikacja generuje dane syntetyczne przy pierwszym starcie
+      qdrant:
+        condition: service_started
+    volumes:
+      - app_data:/data
+
+  # --- Baza wektorowa: opisy procesów i instrukcje incydentów (baza wiedzy agentów) ---
   qdrant:
-    image: qdrant/qdrant:v1.18.0
+    image: qdrant/qdrant:v1.19.0
     restart: unless-stopped
     ports:
       - "6333:6333"

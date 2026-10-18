@@ -1,16 +1,19 @@
 # Zestaw pytań testowych ze znaną odpowiedzią (scenariusze zaszyte w danych syntetycznych).
 # Każdy przypadek: kto pyta, w jakim kontekście, jaka powinna być intencja, decyzja Dyspozytora,
-# werdykt Weryfikatora i jakie fakty muszą (lub nie mogą) pojawić się w odpowiedzi.
+# agenci, werdykt Weryfikatora i jakie fakty muszą (lub nie mogą) pojawić się w odpowiedzi.
 
-- name: pracownik – dlaczego sprawa stoi (scenariusz REK-2026-0412)
+# --- Pracownik ---
+- name: pracownik – dlaczego sprawa stoi (Instancji + Monitor równolegle)
   user: u_anna
   role: pracownik
   context: REK-2026-0412
   question: Dlaczego ta sprawa stoi od 4 dni? Co mam zrobić dalej?
   intent: instance_diagnosis
   decision: route
+  agents: [Agent Instancji, Agent Monitor]
   verdict: ok
-  must_contain: ["Protokół szkody", "21.10.2026", "brak ostrzeżeń i błędów", "Przygotuj przypomnienie do klienta"]
+  must_contain: ["Protokół szkody", "21.10.2026", "brak ostrzeżeń i błędów", "Opis procesu",
+                 "Przygotuj przypomnienie do klienta"]
 
 - name: pracownik – dokumenty w sprawie
   user: u_anna
@@ -19,6 +22,7 @@
   question: Jakie dokumenty są już w sprawie?
   intent: instance_details
   decision: route
+  agents: [Agent Instancji]
   verdict: ok
   must_contain: ["Formularz reklamacji", "Zdjęcia uszkodzenia", "Brakujące dokumenty: Protokół szkody"]
 
@@ -63,6 +67,15 @@
   verdict: refused
   must_contain: ["nie ma dostępu"]
 
+- name: pracownik – stan platformy (brak uprawnień)
+  user: u_anna
+  role: pracownik
+  context: null
+  question: Czy są jakieś awarie platformy?
+  intent: platform_status
+  decision: refuse
+  verdict: refused
+
 - name: pracownik – pytanie poza zakresem
   user: u_anna
   role: pracownik
@@ -81,6 +94,7 @@
   decision: need_context
   verdict: info
 
+# --- Kierownik ---
 - name: kierownik – sprawa podwładnego czekająca na dział techniczny
   user: u_marek
   role: kierownik
@@ -100,26 +114,53 @@
   decision: refuse
   verdict: refused
 
-- name: kierownik – obciążenie zespołu (Agent Analityk, PoC v2)
+- name: kierownik – obciążenie zespołu (Agent Analityk)
   user: u_marek
   role: kierownik
   context: null
   question: Kto ma najwięcej przeterminowanych zadań w zespole?
   intent: team_overview
-  decision: not_available
-  verdict: info
-  must_contain: ["PoC v2"]
+  decision: route
+  agents: [Agent Analityk]
+  verdict: ok
+  must_contain: ["Najwięcej spraw po terminie ma Jan Mazur", "Dział techniczny (3)", "Kasia Dąbrowska",
+                 "Zaproponuj przesunięcie spraw w zespole"]
+  must_not_contain: ["Zofia Krawczyk"]
 
-- name: właściciel procesu – wąskie gardła (Agent Analityk, PoC v2)
+- name: kierownik – analityka procesu innego zespołu (brak uprawnień)
+  user: u_marek
+  role: kierownik
+  context: null
+  question: Jakie są wąskie gardła procesu zatwierdzania faktur?
+  intent: process_analytics
+  decision: refuse
+  verdict: refused
+
+# --- Właściciel procesu ---
+- name: właściciel procesu – wąskie gardła reklamacji (Agent Analityk)
   user: u_ewa
   role: wlasciciel
   context: null
   question: Jakie są wąskie gardła procesu reklamacji?
   intent: process_analytics
-  decision: not_available
-  verdict: info
+  decision: route
+  agents: [Agent Analityk]
+  verdict: ok
+  must_contain: ["Wąskim gardłem procesu „Obsługa reklamacji” jest krok „Weryfikacja dokumentów”", "Rekomendacje:",
+                 "telefon"]
 
-- name: administrator – sprawa zatrzymana przez awarię
+- name: właściciel procesu – raport faktur
+  user: u_ewa
+  role: wlasciciel
+  context: null
+  question: Raport procesu zatwierdzania faktur
+  intent: process_analytics
+  decision: route
+  verdict: ok
+  must_contain: ["Zatwierdzanie faktur", "Akceptacja kierownika"]
+
+# --- Administrator ---
+- name: administrator – sprawa zatrzymana przez awarię (wniosek Monitora ma pierwszeństwo)
   user: u_tomasz
   role: admin
   context: null
@@ -127,16 +168,19 @@
   intent: instance_diagnosis
   decision: route
   verdict: ok
-  must_contain: ["błąd techniczny", "18.10.2026 10:24", "Zgłoś incydent techniczny administratorowi"]
+  must_contain: ["Sprawa jest zatrzymana przez błąd techniczny", "18.10.2026 10:24",
+                 "Zgłoś incydent techniczny administratorowi"]
 
-- name: administrator – stan platformy (Agent Monitor, PoC v2)
+- name: administrator – stan platformy (Agent Monitor + baza wiedzy)
   user: u_tomasz
   role: admin
   context: null
   question: Jaki jest stan platformy, są jakieś awarie?
   intent: platform_status
-  decision: not_available
-  verdict: info
+  decision: route
+  agents: [Agent Monitor]
+  verdict: ok
+  must_contain: ["alerty krytyczne: 1", "repozytorium dokumentów", "restartem bramy", "312 s"]
 
 - name: nieistniejąca sprawa
   user: u_tomasz

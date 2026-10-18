@@ -20,13 +20,27 @@ INTENT_ROLES = {
     "instance_diagnosis": {"pracownik", "kierownik", "wlasciciel", "admin"},
     "instance_details": {"pracownik", "kierownik", "wlasciciel", "admin"},
     "my_work": {"pracownik", "kierownik", "wlasciciel", "admin"},
-    "team_overview": {"kierownik", "admin"},          # Agent Analityk – PoC v2
-    "process_analytics": {"wlasciciel", "kierownik", "admin"},  # Agent Analityk – PoC v2
-    "platform_status": {"admin"},                     # Agent Monitor – PoC v2
+    "team_overview": {"kierownik", "admin"},                    # Agent Analityk
+    "process_analytics": {"wlasciciel", "kierownik", "admin"},  # Agent Analityk
+    "platform_status": {"admin"},                               # Agent Monitor
 }
 
-# Intencje obsługiwane w PoC v1 przez Agenta Instancji.
-V1_INTENTS = {"instance_diagnosis", "instance_details", "my_work"}
+# Procesy w zakresie użytkownika (dla Agenta Analityka).
+def visible_process_ids(user: "User") -> list[str]:
+    if user.role in ("admin", "system"):
+        rows = query("SELECT id FROM processes ORDER BY id")
+    elif user.role == "wlasciciel":
+        rows = query("SELECT id FROM processes WHERE owner_id = ? ORDER BY id", (user.id,))
+    elif user.role == "kierownik":
+        rows = query("SELECT id FROM processes WHERE team_id IN (SELECT id FROM teams WHERE manager_id = ?)"
+                     " ORDER BY id", (user.id,))
+    else:
+        rows = []
+    return [r["id"] for r in rows]
+
+
+def managed_team(user: "User") -> dict | None:
+    return query_one("SELECT id, name FROM teams WHERE manager_id = ?", (user.id,))
 
 
 @dataclass(frozen=True)
@@ -38,7 +52,7 @@ class User:
 
     @property
     def role_label(self) -> str:
-        return ROLE_LABELS.get(self.role, self.role)
+        return ROLE_LABELS.get(self.role, "System")
 
 
 def get_user(user_id: str) -> User:
@@ -60,7 +74,7 @@ def _visibility_clause(user: User) -> tuple[str, tuple]:
         return "i.team_id IN (SELECT id FROM teams WHERE manager_id = ?)", (user.id,)
     if user.role == "wlasciciel":
         return "i.process_id IN (SELECT id FROM processes WHERE owner_id = ?)", (user.id,)
-    if user.role == "admin":
+    if user.role in ("admin", "system"):
         return "1 = 1", ()
     return "1 = 0", ()
 

@@ -1,4 +1,4 @@
-"""Zestaw pytań testowych (sekcja 6 dokumentu): routing, uprawnienia, grounding."""
+"""Zestaw pytań testowych (sekcja 6 dokumentu): routing, uprawnienia, grounding – wszystkie 4 role."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -17,6 +17,8 @@ def test_golden_question(case):
     assert result["intent"] == case["intent"]
     assert result["decision"] == case["decision"]
     assert result["verdict"] == case["verdict"]
+    if "agents" in case:
+        assert result["agents"] == case["agents"]
     for text in case.get("must_contain", []):
         assert text in result["answer"], f"brak „{text}” w odpowiedzi:\n{result['answer']}"
     for text in case.get("must_not_contain", []):
@@ -29,6 +31,11 @@ def test_routing_accuracy_meets_target():
     assert hits / len(CASES) >= 0.9
 
 
-def test_trace_lists_agents_in_order():
+def test_parallel_agents_in_trace():
     result = ask("Dlaczego ta sprawa stoi?", "u_anna", "pracownik", "REK-2026-0412")
-    assert [s["agent"] for s in result["trace"]] == ["Dyspozytor", "Agent Instancji", "Redaktor-Weryfikator"]
+    agents = [s["agent"] for s in result["trace"]]
+    assert agents[0] == "Dyspozytor" and agents[-1] == "Redaktor-Weryfikator"
+    assert set(agents[1:-1]) == {"Agent Instancji", "Agent Monitor"}
+    # numeracja faktów nie zależy od kolejności zakończenia pracy równoległej
+    assert result["numbered_facts"][0]["agent"] == "Agent Instancji"
+    assert result["numbered_facts"][-1]["agent"] == "Agent Monitor"

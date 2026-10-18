@@ -1,4 +1,4 @@
-"""Asystent operacyjny IBM BAW – aplikacja Streamlit (PoC v1).
+"""Asystent operacyjny IBM BAW – aplikacja Streamlit (PoC v2).
 
 Uruchomienie lokalne:  streamlit run streamlit_app.py
 """
@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import streamlit as st
 
-from baw_assistant import db
+import logging
+
+from baw_assistant import db, kb
 from baw_assistant.config import get_settings
 from baw_assistant.data_generator import generate
 from baw_assistant.llm import llm_error, llm_label
@@ -16,19 +18,23 @@ from ui import agents_page, analytics_page, assistant_page, monitoring_page, tea
 st.set_page_config(page_title="Asystent BAW", page_icon=":material/smart_toy:", layout="wide")
 
 
-@st.cache_resource(show_spinner="Przygotowuję dane syntetyczne…")
-def ensure_data() -> bool:
+@st.cache_resource(show_spinner="Przygotowuję dane syntetyczne i bazę wiedzy…")
+def ensure_data() -> dict:
     if not db.database_ready():
         generate()
-    return True
+    try:
+        return {"kb_chunks": kb.ensure_index(), "kb_error": None}
+    except Exception as exc:  # aplikacja działa bez bazy wiedzy (agenci pomijają te fakty)
+        logging.getLogger(__name__).warning("Baza wiedzy niedostępna: %s", exc)
+        return {"kb_chunks": 0, "kb_error": str(exc)}
 
 
-ensure_data()
+boot = ensure_data()
 settings = get_settings()
 
 with st.sidebar:
     st.markdown("### Asystent BAW")
-    st.caption("PoC v1 · dane syntetyczne")
+    st.caption("PoC v2 · dane syntetyczne")
     role = st.selectbox("Rola (symulacja logowania)", list(ROLE_LABELS), format_func=ROLE_LABELS.get,
                         key="role")
     users = users_with_role(role)
@@ -62,6 +68,8 @@ with st.sidebar:
                    "Sprawdź OPENAI_API_KEY i LLM_MODEL w pliku .env.", icon=":material/warning:")
     st.caption(f"Symulowany czas: {settings.sim_now:%d.%m.%Y %H:%M}")
     st.caption("Langfuse: " + ("włączony" if settings.langfuse_enabled else "wyłączony"))
+    st.caption(f"Baza wiedzy (Qdrant, {kb.embedding_mode()}): "
+               + (f"{boot['kb_chunks']} sekcji" if not boot["kb_error"] else "niedostępna"))
     st.caption("Widoczne strony i zakres danych agentów zależą od wybranej roli.")
 
 nav.run()

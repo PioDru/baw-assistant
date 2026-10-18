@@ -40,6 +40,7 @@ USERS = [
     ("u_barbara", "Barbara Zając", "kierownik", "T_BO"),
     ("u_ewa", "Ewa Wiśniewska", "wlasciciel", None),
     ("u_tomasz", "Tomasz Zieliński", "admin", None),
+    ("u_system", "System BAW", "system", None),   # konto techniczne trybu systemowego (UCA, EDA, harmonogram)
 ]
 
 # Kroki procesów ze średnim czasem trwania (dni).
@@ -286,7 +287,8 @@ class Generator:
     # --- zapis ----------------------------------------------------------------
     def write(self, conn: sqlite3.Connection) -> None:
         init_schema(conn)
-        for table in ("teams", "users", "processes", "instances", "tasks", "events", "documents", "logs"):
+        for table in ("teams", "users", "processes", "instances", "tasks", "events", "documents", "logs",
+                      "event_queue", "alerts", "notifications", "action_log"):
             conn.execute(f"DELETE FROM {table}")
         conn.executemany("INSERT INTO teams VALUES (?,?,?)", TEAMS)
         conn.executemany(

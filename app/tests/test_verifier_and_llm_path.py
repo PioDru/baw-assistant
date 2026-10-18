@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from baw_assistant.agents import dispatcher, instance_agent
+from baw_assistant.agents import dispatcher, editor_verifier
 from baw_assistant.agents.editor_verifier import check_draft
 from baw_assistant.graph import ask
 
@@ -49,7 +49,7 @@ class FakeLLM:
 
 def _patch(monkeypatch, llm):
     monkeypatch.setattr(dispatcher, "get_llm", lambda: llm)
-    monkeypatch.setattr(instance_agent, "get_llm", lambda: llm)
+    monkeypatch.setattr(editor_verifier, "get_llm", lambda: llm)
 
 
 def test_llm_answer_with_citations_is_accepted(monkeypatch):
@@ -61,13 +61,12 @@ def test_llm_answer_with_citations_is_accepted(monkeypatch):
     assert {f["id"] for f in result["sources"]} == {"F2", "F6"}
 
 
-def test_hallucination_is_sent_back_then_fixed(monkeypatch):
+def test_hallucination_is_corrected_on_second_attempt(monkeypatch):
     llm = FakeLLM(["Sprawa stoi od 9 dni [F3].", "Sprawa stoi od 4 dni [F3]."])
     _patch(monkeypatch, llm)
     result = ask("Dlaczego ta sprawa stoi?", "u_anna", "pracownik", "REK-2026-0412")
-    assert result["verdict"] == "ok" and llm.calls == 2
-    assert [s["agent"] for s in result["trace"]] == ["Dyspozytor", "Agent Instancji", "Redaktor-Weryfikator",
-                                                     "Agent Instancji", "Redaktor-Weryfikator"]
+    assert result["verdict"] == "ok" and llm.calls == 2 and result["attempts"] == 2
+    assert "Poprawki: 1" in result["trace"][-1]["summary"]
 
 
 def test_repeated_hallucination_is_blocked(monkeypatch):
@@ -83,3 +82,10 @@ def test_llm_cannot_bypass_permissions(monkeypatch):
     _patch(monkeypatch, FakeLLM([], intent="team_overview"))
     result = ask("Pokaż wszystko", "u_anna", "pracownik", None)
     assert result["verdict"] == "refused"
+
+
+def test_llm_cannot_leak_other_instance(monkeypatch):
+    llm = FakeLLM(["Podobnie jak w REK-2026-0377 [F1].", "Podobnie jak w REK-2026-0377 [F1]."])
+    _patch(monkeypatch, llm)
+    result = ask("Dlaczego ta sprawa stoi?", "u_anna", "pracownik", "REK-2026-0412")
+    assert result["verdict"] == "blocked" and "REK-2026-0377" not in result["answer"]
