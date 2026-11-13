@@ -14,7 +14,7 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 COPY . .
-RUN chmod +x entrypoint.sh && mkdir -p /data
+RUN sed -i 's/\r$//' entrypoint.sh && chmod +x entrypoint.sh && mkdir -p /data
 
 EXPOSE 8501
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \

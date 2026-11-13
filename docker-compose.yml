@@ -92,6 +92,7 @@ services:
       SCAN_INTERVAL_MIN: ${SCAN_INTERVAL_MIN:-5}
       QUEUE_POLL_SECONDS: ${QUEUE_POLL_SECONDS:-15}
     healthcheck:
+      test: ["NONE"]
       disable: true
     depends_on:
       app:
