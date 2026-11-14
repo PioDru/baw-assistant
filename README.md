@@ -43,6 +43,7 @@ docker compose up -d --build
 | --- | --- |
 | `app` | http://localhost:8501 – Streamlit |
 | `worker` | harmonogram skanów (co 5 min) i przetwarzanie kolejki zdarzeń (co 15 s) |
+| `litellm` | http://localhost:4000 – bramka LiteLLM Proxy (routing modeli MoE / Fast / Cloud) |
 | `qdrant` | http://localhost:6333/dashboard – baza wiedzy agentów |
 | `langfuse-web` | http://localhost:3000 – ślady i koszty (login: `admin@baw.local` / `baw-admin-123`) |
 
@@ -75,13 +76,27 @@ Lokalny Qdrant (`local:` lub `":memory:"`) obsługuje tylko jeden proces – z w
 
 ## Konfiguracja modeli
 
-| Zmienna | Wartości |
-| --- | --- |
-| `LLM_MODEL` | `openai:gpt-6-luna` (domyślnie), `openai:openai/gpt-6-luna` + `OPENAI_BASE_URL=https://openrouter.ai/api/v1`, `mock` (bez LLM) |
-| `EMBEDDING_MODEL` | `auto` (OpenAI `text-embedding-3-small`, gdy jest klucz; inaczej lokalny embedding haszujący), `openai`, `hash` |
+Asystent wykorzystuje dedykowaną bramkę **LiteLLM Proxy** do dynamicznego zarządzania modelami lokalnymi i chmurowymi z automatycznym mechanizmem fallback:
 
-Gdy modelu nie da się użyć (brak klucza, błąd sieci), agenci przechodzą na reguły i szablony,
-a panel boczny pokazuje ostrzeżenie.
+| Zmienna | Opis / Wartości |
+| --- | --- |
+| `LLM_MODEL` | `openai:baw-moe-main` (główny model analityczno-weryfikacyjny przez Proxy), `openai:baw-fast` (lekki model dyspozytora), `openai:gpt-6-luna` (bezpośrednio OpenAI), `mock` (bez LLM) |
+| `LLM_BASE_URL` | Adres punktu wejścia API (np. `http://litellm:4000/v1` w Dockerze, `http://localhost:4000/v1` lokalnie) |
+| `LOCAL_FAST_SERVER_URL` | Endpoint silnika inferencji dla modelu szybkiego Dyspozytora (np. `http://localhost:8081/v1` – model `openai/qwen-3b-instruct-q4`) |
+| `LOCAL_MOE_SERVER_URL` | Endpoint silnika inferencji dla modelu MoE Analityka/Weryfikatora (np. `http://localhost:8082/v1` – model `openai/gemma-4-26b-a4b`) |
+| `FALLBACK_CLOUD_MODEL` | Model zapasowy w chmurze (np. `openai/gpt-4o`), używany automatycznie w razie niedostępności lokalnego GPU |
+| `EMBEDDING_PROVIDER` | `auto` (OpenAI `text-embedding-3-small`, gdy jest klucz; inaczej lokalny embedding haszujący), `openai`, `hash` |
+
+Gdy żaden model nie jest dostępny (brak połączenia z bramką / serwerami lokalnymi i brak klucza API), agenci bezpiecznie przechodzą na wbudowane reguły i szablony, a panel boczny wyświetla stosowne powiadomienie.
+
+## Integracja z serwerami MCP (Model Context Protocol)
+
+Asystent wspiera udostępnianie i pobieranie danych procesowych za pośrednictwem protokołu MCP w dwóch trybach:
+
+1. **Lokalny serwer FastMCP (`internal`):** Uruchamiany jako proces podrzędny `python -m baw_assistant.mcp_server` (`BAW-Assistant-Local-MCP-Server`). Zapewnia najniższy czas odpowiedzi i bezpośredni dostęp do bazy spraw przez narzędzie `get_instance_details`.
+2. **Kontener `MCP_DOCKER` przez transport SSE (`docker_sse`):** Łączy się z kontenerem narzędziowym uruchomionym w Docker Desktop pod adresem `http://localhost:8080/sse`. Izoluje środowisko wykonawcze i ułatwia współdzielenie narzędzi analitycznych między różnymi aplikacjami.
+
+Konfiguracja odbywa się przez zmienne `MCP_PROVIDER_MODE`, `MCP_DOCKER_SSE_URL`, `MCP_DOCKER_BEARER_TOKEN`, `MCP_LOCAL_COMMAND` oraz `MCP_LOCAL_ARGS` w pliku `.env`.
 
 ## Scenariusze demo
 

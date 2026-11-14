@@ -7,24 +7,57 @@ prośba procesu o podsumowanie sprawy – UCA).
 """
 from __future__ import annotations
 
+import logging
 import time
 
 from .. import kb, tools
+from ..config import get_settings
 from ..data_generator import DOC_REQUIRED
+from ..mcp_client import call_mcp_tool_sync
 from ..rbac import get_user, visible_active_instances
 from ..state import AssistantState
 from .common import (ACTION_ESCALATE_SLA, ACTION_PING_DEPT, ACTION_REMIND, AGENT_INSTANCE, Findings, days_dec,
                      days_word, elapsed_ms, left)
 
+log = logging.getLogger(__name__)
+
+
+def _get_instance(instance_id: str) -> dict | None:
+    settings = get_settings()
+    if settings.mcp_provider_mode in ("internal", "docker_sse"):
+        try:
+            mcp_data = call_mcp_tool_sync("get_instance_details", {"instance_id": instance_id})
+            if isinstance(mcp_data, dict) and "error" not in mcp_data and "id" in mcp_data:
+                inst = tools.get_instance(instance_id) or {}
+                inst.update({
+                    "id": mcp_data.get("id", inst.get("id")),
+                    "process_id": mcp_data.get("process_id", inst.get("process_id")),
+                    "process_name": mcp_data.get("process_name", inst.get("process_name")),
+                    "status": mcp_data.get("status", inst.get("status")),
+                    "current_step": mcp_data.get("current_step", inst.get("current_step")),
+                    "assignee_name": mcp_data.get("assignee_name", inst.get("assignee_name")),
+                    "missing_docs": mcp_data.get("missing_docs", inst.get("missing_docs", [])),
+                    "_source": f"MCP [{settings.mcp_provider_mode}]",
+                })
+                return inst
+        except Exception as e:
+            log.warning("Pobieranie instancji %s przez MCP nie powiodło się, użyto fallbacku: %s", instance_id, e)
+
+    inst = tools.get_instance(instance_id)
+    if inst:
+        inst["_source"] = "instancje"
+    return inst
+
 
 def _core(f: Findings, inst: dict) -> None:
+    source = inst.get("_source", "instancje")
     f.fact(f"Sprawa {inst['id']} ({inst['process_name']}) ma status „{inst['status']}” i jest w kroku "
-           f"„{inst['current_step']}”. Przypisana osoba: {inst['assignee_name']}.", "instancje")
+           f"„{inst['current_step']}”. Przypisana osoba: {inst['assignee_name']}.", source)
     d = tools.days_between(tools.now(), inst["sla_due"])
     if d >= 0:
-        f.fact(f"Termin SLA: {tools.fmt_date(inst['sla_due'])}, {left(d)}.", "instancje")
+        f.fact(f"Termin SLA: {tools.fmt_date(inst['sla_due'])}, {left(d)}.", source)
     else:
-        f.fact(f"Termin SLA: {tools.fmt_date(inst['sla_due'])} – przekroczony o {-d} {days_word(-d)}.", "instancje")
+        f.fact(f"Termin SLA: {tools.fmt_date(inst['sla_due'])} – przekroczony o {-d} {days_word(-d)}.", source)
 
 
 def _open_tasks(f: Findings, instance_id: str) -> tuple[dict | None, dict | None]:
@@ -54,7 +87,7 @@ def _process_guidance(f: Findings, inst: dict, role: str) -> None:
 
 
 def diagnosis(f: Findings, instance_id: str, role: str) -> None:
-    inst = tools.get_instance(instance_id)
+    inst = _get_instance(instance_id)
     _core(f, inst)
     idle = tools.days_between(inst["last_change_at"])
     ago = "dzisiaj" if idle == 0 else f"czyli {idle} {days_word(idle)} temu"
@@ -90,7 +123,7 @@ def diagnosis(f: Findings, instance_id: str, role: str) -> None:
 
 
 def details(f: Findings, instance_id: str, limit_events: int = 8) -> None:
-    inst = tools.get_instance(instance_id)
+    inst = _get_instance(instance_id)
     events = tools.get_events(instance_id)
     docs = tools.get_documents(instance_id)
     _core(f, inst)
@@ -127,7 +160,7 @@ def my_work(f: Findings, user_id: str) -> None:
 
 def document_event(f: Findings, payload: dict) -> None:
     iid = payload["instance_id"]
-    inst = tools.get_instance(iid)
+    inst = _get_instance(iid)
     f.fact(f"Zdarzenie EDA: w systemie „{payload.get('system', 'repozytorium dokumentów')}” pojawiła się wersja "
            f"{payload['version']} dokumentu „{payload['document']}” dla sprawy {iid}.", "zdarzenie EDA")
     _core(f, inst)

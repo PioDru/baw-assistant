@@ -89,7 +89,20 @@ def render() -> None:
     prompt = st.chat_input("Napisz pytanie…", key=f"input_{user.id}") or clicked
     if prompt:
         history.append({"role": "user", "content": prompt})
-        with st.spinner("Agenci pracują…"):
-            result = ask(prompt, user.id, user.role, context_id, session_id=session_id)
+        with chat_col:
+            with st.chat_message("user", avatar=":material/person:"):
+                st.markdown(prompt)
+            with st.chat_message("assistant", avatar=":material/smart_toy:"):
+                response_placeholder = st.empty()
+                streamed_tokens: list[str] = []
+
+                def _on_token(token: str) -> None:
+                    streamed_tokens.append(token)
+                    response_placeholder.markdown("".join(streamed_tokens) + "▌")
+
+                with st.spinner("Agenci pracują…"):
+                    result = ask(prompt, user.id, user.role, context_id, session_id=session_id, on_token=_on_token)
+
+                response_placeholder.empty()
         history.append({"role": "assistant", "result": result})
         st.rerun()

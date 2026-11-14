@@ -1,0 +1,62 @@
+# Konfiguracja routingu i modeli dla LiteLLM Proxy
+# Odwołania do zmiennych środowiskowych umożliwiają pełną parametryzację z poziomu .env.
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+model_list:
+  # 1. Model lekki / Triage (Dyspozytor)
+  # Instancja lokalna (port 8081 / VRAM)
+  - model_name: baw-fast
+    litellm_params:
+      model: os.environ/LOCAL_FAST_MODEL
+      api_base: os.environ/LOCAL_FAST_SERVER_URL
+      api_key: os.environ/LOCAL_FAST_API_KEY
+  # Instancja chmurowa (zapasowa pod tą samą nazwą logiczną)
+  - model_name: baw-fast
+    litellm_params:
+      model: os.environ/FALLBACK_CLOUD_MODEL
+      api_base: os.environ/OPENAI_BASE_URL
+      api_key: os.environ/OPENAI_API_KEY
+
+  # 2. Główny model MoE (Instancja, Analityk, Redaktor, Monitor)
+  # Instancja lokalna (port 8082 / VRAM + RAM)
+  - model_name: baw-moe-main
+    litellm_params:
+      model: os.environ/LOCAL_MOE_MODEL
+      api_base: os.environ/LOCAL_MOE_SERVER_URL
+      api_key: os.environ/LOCAL_MOE_API_KEY
+  # Instancja chmurowa (zapasowa pod tą samą nazwą logiczną)
+  - model_name: baw-moe-main
+    litellm_params:
+      model: os.environ/FALLBACK_CLOUD_MODEL
+      api_base: os.environ/OPENAI_BASE_URL
+      api_key: os.environ/OPENAI_API_KEY
+
+  # 3. Model chmurowy (Awaryjny / Bezpośredni)
+  - model_name: baw-cloud-fallback
+    litellm_params:
+      model: os.environ/FALLBACK_CLOUD_MODEL
+      api_base: os.environ/OPENAI_BASE_URL
+      api_key: os.environ/OPENAI_API_KEY
+
+router_settings:
+  routing_strategy: latency-based-routing
+  num_retries: 2
+  retry_after: 0
+  allowed_fails: 1
+  cooldown_time: 86400
+  fallbacks:
+    - baw-moe-main: ["baw-cloud-fallback"]
+    - baw-fast: ["baw-moe-main", "baw-cloud-fallback"]
+
+# --- Konfiguracja rejestrowania zdarzeń i telemetrii ---
+litellm_settings:
+  # Automatyczne odrzucanie parametrów nieobsługiwanych przez modele docelowe (np. temperature=0.0 w modelach reasoning)
+  drop_params: true
+  # Włącza szczegółowe logi routera w stdout (wybór modelu, latency, błędy)
+  set_verbose: true
+  # Integracja z Langfuse do wizualizacji ścieżek wykonania
+  callbacks: ["langfuse"]
+  # Czytelny format logów konsolowych
+  json_logs: false

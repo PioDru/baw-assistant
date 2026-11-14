@@ -64,13 +64,14 @@ def _run(initial: AssistantState, user_id: str, role: str, session_id: str) -> d
 
 
 def ask(question: str, user_id: str, role: str, context_instance_id: str | None = None,
-        session_id: str | None = None, params: dict | None = None) -> dict[str, Any]:
+        session_id: str | None = None, params: dict | None = None,
+        on_token: Any | None = None) -> dict[str, Any]:
     """Pytanie użytkownika (tryb interaktywny). Przebieg trafia do tabeli agent_runs."""
     started = time.perf_counter()
     initial: AssistantState = {"mode": "chat", "question": question, "user_id": user_id, "role": role,
                                "context_instance_id": context_instance_id, "params": params or {}, "trace": [],
                                "facts": [], "leads": [], "suggested_actions": [], "recommendations": [],
-                               "alerts": [], "data": {}}
+                               "alerts": [], "data": {}, "on_token": on_token}
     result = _run(initial, user_id, role, session_id or str(uuid.uuid4()))
     result["latency_ms"] = int((time.perf_counter() - started) * 1000)
     result["suggested_actions"] = list(dict.fromkeys(result.get("suggested_actions") or []))

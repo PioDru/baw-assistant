@@ -77,6 +77,21 @@ def render_answer(result: dict, key: str, user: User, context_instance_id: str |
             for f in sources:
                 st.markdown(f"**[{f['id']}]** {f['text']}  \n<small>źródło: {f['source']} · {f.get('agent', '')}</small>",
                             unsafe_allow_html=True)
+    if result.get("verdict") == "blocked":
+        draft_text = result.get("draft")
+        if not draft_text:
+            for step in result.get("trace", []):
+                details = step.get("details", {})
+                attempts_obj = details.get("attempts")
+                if isinstance(attempts_obj, list):
+                    for att in reversed(attempts_obj):
+                        if isinstance(att, dict) and att.get("draft"):
+                            draft_text = att["draft"]
+                            break
+                if draft_text:
+                    break
+        with st.expander("Zablokowana odpowiedź"):
+            st.markdown(draft_text or "*(brak zarejestrowanego szkicu odpowiedzi modelu)*")
 
 
 def render_trace(result: dict | None) -> None:

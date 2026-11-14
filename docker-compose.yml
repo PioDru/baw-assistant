@@ -53,20 +53,63 @@ x-langfuse-depends: &langfuse-depends
     condition: service_healthy
 
 services:
+  # --- Bramka LLM Proxy (routing, fallback, ujednolicone API dla modeli lokalnych i chmurowych) ---
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml:ro
+    environment:
+      # Klucz główny LiteLLM Proxy i zezwolenie na tryb deweloperski
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-local-litellm-token}
+      LITELLM_DANGEROUSLY_PERMIT_WEAK_OR_UNSET_MASTER_KEY: "true"
+      LOCAL_FAST_SERVER_URL: http://host.docker.internal:8081/v1
+      LOCAL_FAST_MODEL: ${LOCAL_FAST_MODEL:-openai/qwen-3b-instruct-q4}
+      LOCAL_FAST_API_KEY: ${LOCAL_FAST_API_KEY:-none}
+      LOCAL_MOE_SERVER_URL: http://host.docker.internal:8082/v1
+      LOCAL_MOE_MODEL: ${LOCAL_MOE_MODEL:-openai/gemma-4-26b-a4b}
+      LOCAL_MOE_API_KEY: ${LOCAL_MOE_API_KEY:-none}
+      FALLBACK_CLOUD_MODEL: ${FALLBACK_CLOUD_MODEL:-openai/openai/gpt-6-luna}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Integracja telemetrii Langfuse dla Proxy
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-lf-baw-local}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-baw-local}
+      LANGFUSE_HOST: ${LANGFUSE_BASE_URL:-http://langfuse-web:3000}
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4", "--detailed_debug"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health/liveliness"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
   # --- Aplikacja: Streamlit + LangGraph (5 agentów) ---
   app:
     build: ./app
     restart: unless-stopped
     ports:
       - "8501:8501"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - path: .env
         required: false
     environment: &app-env
       DB_PATH: /data/baw.db
-      LLM_MODEL: ${LLM_MODEL:-openai:gpt-6-luna}
+      LLM_MODEL: ${LLM_MODEL:-openai:baw-moe-main}
+      LLM_BASE_URL: http://litellm:4000/v1
+      LLM_API_KEY: ${LLM_API_KEY:-sk-local-litellm-token}
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-auto}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-auto}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       SIM_NOW: ${SIM_NOW:-2026-10-18T10:45:00}
       QDRANT_URL: http://qdrant:6333
       LANGFUSE_ENABLED: ${LANGFUSE_ENABLED:-true}
@@ -76,6 +119,8 @@ services:
     depends_on:
       qdrant:
         condition: service_started
+      litellm:
+        condition: service_started
     volumes:
       - app_data:/data
 
@@ -84,13 +129,15 @@ services:
     build: ./app
     restart: unless-stopped
     command: ["worker"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - path: .env
         required: false
     environment:
       <<: *app-env
-      SCAN_INTERVAL_MIN: ${SCAN_INTERVAL_MIN:-5}
-      QUEUE_POLL_SECONDS: ${QUEUE_POLL_SECONDS:-15}
+      SCAN_INTERVAL_MIN: ${SCAN_INTERVAL_MIN:-30}
+      QUEUE_POLL_SECONDS: ${QUEUE_POLL_SECONDS:-60}
     healthcheck:
       test: ["NONE"]
       disable: true
@@ -98,6 +145,8 @@ services:
       app:
         condition: service_healthy   # aplikacja generuje dane syntetyczne przy pierwszym starcie
       qdrant:
+        condition: service_started
+      litellm:
         condition: service_started
     volumes:
       - app_data:/data

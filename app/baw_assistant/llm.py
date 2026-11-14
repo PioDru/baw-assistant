@@ -17,23 +17,45 @@ log = logging.getLogger(__name__)
 _init_error: str | None = None
 
 
-@lru_cache(maxsize=1)
-def get_llm() -> Any | None:
+def create_llm(
+    model: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> Any | None:
+    """Tworzy instancję modelu LLM dla zadanych parametrów lub domyślnych z konfiguracji."""
     global _init_error
     settings = get_settings()
-    if settings.mock_llm:
+    target_model = model or settings.llm_model
+    if target_model.lower() in ("mock", "mock:rules"):
         return None
     try:
         from langchain.chat_models import init_chat_model
 
         kwargs: dict[str, Any] = {}
-        if settings.llm_temperature is not None:
-            kwargs["temperature"] = settings.llm_temperature
-        return init_chat_model(settings.llm_model, **kwargs)
+        target_base_url = base_url if base_url is not None else settings.llm_base_url
+        if target_base_url:
+            kwargs["base_url"] = target_base_url
+        target_api_key = api_key if api_key is not None else settings.llm_api_key
+        if target_api_key:
+            kwargs["api_key"] = target_api_key
+        target_temp = temperature if temperature is not None else settings.llm_temperature
+        if target_temp is not None:
+            kwargs["temperature"] = target_temp
+        target_tokens = max_tokens if max_tokens is not None else settings.llm_max_tokens
+        if target_tokens is not None:
+            kwargs["max_tokens"] = target_tokens
+        return init_chat_model(target_model, **kwargs)
     except Exception as exc:
         _init_error = str(exc)
-        log.warning("Nie udało się utworzyć modelu %s, używam reguł i szablonów: %s", settings.llm_model, exc)
+        log.warning("Nie udało się utworzyć modelu %s: %s", target_model, exc)
         return None
+
+
+@lru_cache(maxsize=1)
+def get_llm() -> Any | None:
+    return create_llm()
 
 
 def llm_label() -> str:

@@ -60,10 +60,11 @@ RETRY_EVERY_S = 30   # przy niedostępnym Qdrant kolejna próba najwcześniej po
 def embedding_mode() -> str:
     if _mode_override:
         return _mode_override
-    mode = os.getenv("EMBEDDING_MODEL", "auto")
+    mode = os.getenv("EMBEDDING_PROVIDER") or os.getenv("EMBEDDING_MODEL", "auto")
+    has_key = bool(os.getenv("EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY"))
     if mode == "auto":
-        return "hash" if get_settings().mock_llm or not os.getenv("OPENAI_API_KEY") else "openai"
-    return "hash" if mode == "hash" else "openai"
+        return "hash" if get_settings().mock_llm or not has_key else "openai"
+    return "hash" if mode in ("hash", "local") else "openai"
 
 
 def _tokens(text: str) -> list[str]:
@@ -88,7 +89,17 @@ def _hash_embed(text: str) -> list[float]:
 def _openai_embedder():
     from langchain_openai import OpenAIEmbeddings
 
-    return OpenAIEmbeddings(model=os.getenv("EMBEDDING_OPENAI_MODEL", "text-embedding-3-small"))
+    model_name = os.getenv("EMBEDDING_OPENAI_MODEL") or os.getenv("EMBEDDING_MODEL") or "text-embedding-3-small"
+    if model_name in ("auto", "hash", "openai", "local"):
+        model_name = "text-embedding-3-small"
+    api_key = os.getenv("EMBEDDING_API_KEY") or os.getenv("OPENAI_API_KEY")
+    base_url = os.getenv("EMBEDDING_BASE_URL") or os.getenv("OPENAI_BASE_URL")
+    kwargs: dict[str, Any] = {"model": model_name}
+    if api_key:
+        kwargs["api_key"] = api_key
+    if base_url:
+        kwargs["base_url"] = base_url
+    return OpenAIEmbeddings(**kwargs)
 
 
 def embed(texts: list[str]) -> list[list[float]]:

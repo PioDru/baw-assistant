@@ -32,55 +32,346 @@ LIST_MARKER_RE = re.compile(r"^\s*\d+[.)]\s", re.MULTILINE)
 DECISION_PREFIX = {"refuse": "Nie mogę odpowiedzieć na to pytanie.", "need_context": "Potrzebuję kontekstu.",
                    "not_found": "Nie znalazłem tej sprawy.", "disabled": "Ta funkcja jest chwilowo niedostępna."}
 
-COMPOSE_PROMPT = """Jesteś Redaktorem-Weryfikatorem w asystencie operacyjnym IBM BAW. Składasz odpowiedź po polsku
-z faktów zebranych przez agentów. Pisz zwięźle (do ok. 150 słów, potem listy).
-Zasady:
-- Korzystaj WYŁĄCZNIE z faktów z listy. Nie dodawaj liczb, dat, godzin, nazw ani numerów spraw spoza faktów.
-- Po każdym zdaniu z liczbą, datą lub nazwą dodaj odnośnik do faktu, np. [F2].
-- Zacznij od bezpośredniej odpowiedzi (wniosek główny), potem najważniejsze fakty.
-- Jeśli podano rekomendacje, dodaj sekcję „Rekomendacje:” (lista punktowana, bez nowych liczb).
-- Jeśli podano akcje sugerowane, zakończ sekcją „Sugerowane kroki:” z listą numerowaną tylko tych akcji."""
+COMPOSE_PROMPT = """Jesteś Redaktorem-Weryfikatorem w asystencie operacyjnym IBM BAW. Składasz zwięzłą odpowiedź po polsku
+(do ok. 150 słów) wyłącznie na podstawie podanych faktów.
 
-EVENT_PROMPT = """Jesteś Redaktorem-Weryfikatorem w asystencie IBM BAW. Piszesz krótkie powiadomienie po polsku
-(do ok. 80 słów) dla adresata zdarzenia systemowego. Korzystaj WYŁĄCZNIE z faktów; po zdaniach z liczbą, datą
-lub nazwą dodaj odnośnik [F#]. Zacznij od tego, co adresat powinien wiedzieć lub zrobić."""
+KRYTYCZNE ZASADY SPÓJNOŚCI DANYCH:
+1. UŻYWAJ WYŁĄCZNIE DANYCH Z FAKTÓW:
+   - Nie dodawaj żadnych własnych liczb, dat, godzin, wyliczeń, statystyk ani numerów spraw.
+   - Przepisuj liczby i daty DOKŁADNIE w takim formacie, w jakim występują w faktach (np. „21.10.2026”, nie „21 października”).
+   - Nie twórz własnych sumarycznych statystyk (np. nie pisz „masz łącznie 3 zadania”, jeśli w faktach nie ma liczby 3).
+
+2. OBOWIĄZKOWE PRZYPISY [F#]:
+   - Każde zdanie zawierające informację z faktów (w szczególności liczbę, datę, nazwisko lub identyfikator) MUSI kończyć się odpowiednim znacznikiem, np. [F1] lub [F1][F2].
+   - Używaj wyłącznie identyfikatorów istniejących na poniższej liście faktów.
+
+3. STRUKTURA ODPOWIEDZI:
+   - Zacznij od bezpośredniej odpowiedzi (wniosek główny), po czym przedstaw najważniejsze szczegóły.
+   - Jeśli podano rekomendacje, umieść je na końcu w sekcji „Rekomendacje:” (lista punktowana, bez dopisywania nowych liczb).
+   - Jeśli podano akcje sugerowane, umieść je w sekcji „Sugerowane kroki:” (dokładna lista podanych akcji).
+
+4. Po sformułowaniu odpowiedzi natychmiast zakończ generowanie.
+
+PRZYKŁAD WEJŚCIA:
+Fakty:
+[F1] Sprawa REK-2026-0412 oczekuje na decyzję od 4 dni.
+[F2] Termin upływa 21.10.2026.
+Wniosek główny: Sprawa wymaga pilnej akcji.
+
+PRZYKŁAD POPRAWNEJ ODPOWIEDZI:
+Sprawa REK-2026-0412 wymaga pilnej akcji ze względu na zbliżający się termin [F1][F2]. Postępowanie oczekuje na decyzję od 4 dni [F1], a ostateczny termin realizacji upływa 21.10.2026 [F2]."""
+
+EVENT_PROMPT = """Jesteś Redaktorem-Weryfikatorem w asystencie IBM BAW. Piszesz zwięzłe powiadomienie po polsku (do 50-80 słów) na podstawie faktów.
+ZASADY:
+1. Używaj WYŁĄCZNIE podanych faktów. Nie wymyślaj żadnych danych.
+2. Po KAŻDYM zdaniu z liczbą, datą, statystyką lub nazwą sprawy MUSISZ dodać odnośnik do faktu, np. [F1], [F2].
+3. Zacznij bezpośrednio od tego, co adresat powinien wiedzieć lub zrobić.
+4. Po napisaniu powiadomienia natychmiast zakończ generowanie.
+
+Przykład:
+Fakty: [F1] Skan cykliczny: nowe alerty 0.
+Odpowiedź: Skan cykliczny zakończony pomyślnie – nie wykryto nowych alertów [F1]. Brak wymaganych działań."""
 
 
 # --- weryfikacja ----------------------------------------------------------------------
 
-def _tokens(text: str) -> dict[str, set[str]]:
+POLISH_MONTHS = {
+    "stycznia": "01", "styczeń": "01", "lutego": "02", "luty": "02",
+    "marca": "03", "marzec": "03", "kwietnia": "04", "kwiecień": "04",
+    "maja": "05", "maj": "05", "czerwca": "06", "czerwiec": "06",
+    "lipca": "07", "lipiec": "07", "sierpnia": "08", "sierpień": "08",
+    "września": "09", "wrzesień": "09", "października": "10", "październik": "10",
+    "listopada": "11", "listopad": "11", "grudnia": "12", "grudzień": "12",
+}
+
+def normalize_citations(text: str) -> str:
+    """Normalizuje różne warianty formatowania odnośników generowanych przez modele do standardu [F#].
+
+    Obsługiwane warianty:
+    - [F1, F2], (F1, F2), [F1; F2], (F1; F2), [F1 i F2], (F1 oraz F2), [F1 and F2], 【F1, F2】 -> [F1][F2]
+    - (F1), (f1), [f1], 【F1】, [^F1], [F 1], (F 1), [F1.], (F1.) -> [F1]
+    - [F1-F3], (F1-F3), [1-3], [1 - 3], [F1 - F3] -> [F1][F2][F3]
+    - [Fakt 1], (Fakt 1), [Fakt F1], (Fakt F1), [fakt 1], (fakt 1) -> [F1]
+    - [Fakt 1, 2], [Fakty 1, 2], (Fakty: F1, F2), (fakty 1 i 2) -> [F1][F2]
+    - [źródło: F1], (źródła: F1, F2), [źródło: 1, 2], (zob. fakt 1) -> [F1], [F1][F2]
+    - [1], [1, 2], [1; 2], [1 i 2], 【1】, 【1, 2】, [^1] -> [F1], [F1][F2]
+    - Wzmianki tekstowe: zgodnie z faktem 1, wg F1, na podstawie faktów F1 i F2 -> [F1], [F1][F2]
+    """
+    if not text:
+        return text
+
+    # Zamiana nawiasów pełnej szerokości Unicode na standardowe
+    text = text.replace("【", "[").replace("】", "]")
+
+    # 1. Rozwijanie zakresów faktów, np. [F1-F3], (F1-F3), [1-3], [F1 - F3]
+    def _expand_range(m: re.Match) -> str:
+        s_num, e_num = int(m.group(1)), int(m.group(2))
+        if 1 <= s_num <= e_num <= 50 and (e_num - s_num) <= 10:
+            return "".join(f"[F{i}]" for i in range(s_num, e_num + 1))
+        return m.group(0)
+
+    text = re.sub(
+        r"[\[\(]\s*(?:fakt(?:y)?|źródł[oa]|źródła|source(?:s)?|ref)?\s*:?\s*F?(\d+)\s*[-–]\s*F?(\d+)\s*[\]\)]",
+        _expand_range,
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # 2. Prefiksy słowne typu: [Fakt 1], (Fakt 1), [Fakt F1], (źródło: F1), (źródła: 1, 2), (zob. fakt 1)
+    def _replace_keyword_group(m: re.Match) -> str:
+        nums = re.findall(r"\bF?(\d+)\b", m.group(0), flags=re.IGNORECASE)
+        if nums:
+            return "".join(f"[F{n}]" for n in nums)
+        return m.group(0)
+
+    text = re.sub(
+        r"[\[\(]\s*(?:(?:zob\.|patrz|wg|według)\s+)?(?:fakt(?:y)?|źródł[oa]|źródła|source(?:s)?|ref(?:erence)?)\s*:?\s*[^\]\)]+[\]\)]",
+        _replace_keyword_group,
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # 3. Grupy z literą F/f w nawiasach kwadratowych lub okrągłych, np. (F1), [f1], [F1, F2], [F 1], [F1.]
+    def _replace_f_group(m: re.Match) -> str:
+        nums = re.findall(r"F\s*(\d+)", m.group(0), flags=re.IGNORECASE)
+        if nums:
+            return "".join(f"[F{n}]" for n in nums)
+        return m.group(0)
+
+    text = re.sub(
+        r"[\[\(]\s*(?:\^?F\s*\d+\.?\s*(?:[,;/& ]|\bi\b|\boraz\b|\band\b)*)+\s*[\]\)]",
+        _replace_f_group,
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # 4. Przypisy w nawiasach kwadratowych z samymi liczbami / przypisy dolne, np. [1], [1, 2], [^1], [1 i 2]
+    def _replace_num_bracket_group(m: re.Match) -> str:
+        nums = re.findall(r"\d+", m.group(0))
+        if nums:
+            return "".join(f"[F{n}]" for n in nums)
+        return m.group(0)
+
+    text = re.sub(
+        r"\[\s*\^?\d+(?:\s*(?:[,;/& ]|\bi\b|\boraz\b|\band\b)\s*\^?\d+)*\s*\]",
+        _replace_num_bracket_group,
+        text,
+    )
+
+    # 5. Odwołania tekstowe bez nawiasów, np. „zgodnie z faktem 1”, „wg F1”, „w fakcie F2”
+    text = re.sub(
+        r"\b(?:zgodnie z|wg|według|na podstawie|w oparciu o|patrz|zob\.)\s+(?:(?:fakt(?:em|u|ów|y|ie)?|źródł(?:em|a|o|ach)?)\s+)?F?(\d+)\b",
+        r"[F\1]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\b(?:fakt(?:u|y|ów|em|ie)?|źródł(?:o|a|em|ach)?)\s+F(\d+)\b",
+        r"[F\1]",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    return text
+
+
+def _clean_formatting_and_markers(text: str) -> str:
+    """Usuwa znaczniki list, numerację kroków, nagłówki i przypisy, aby nie były traktowane jako dane."""
+    text = normalize_citations(text)
     text = CITATION_RE.sub(" ", text)
-    text = LIST_MARKER_RE.sub(" ", text)
-    found: dict[str, set[str]] = {"instance": set(INSTANCE_RE.findall(text))}
-    text = INSTANCE_RE.sub(" ", text)
-    found["date"] = set(DATE_RE.findall(text))
-    text = DATE_RE.sub(" ", text)
-    found["time"] = set(TIME_RE.findall(text))
-    text = TIME_RE.sub(" ", text)
-    found["number"] = {n.replace(".", ",") for n in NUMBER_RE.findall(text)}
+
+    # Usuwanie nagłówków Markdown (np. ### 1., ## Krok 1)
+    text = re.sub(r"^\s*#{1,6}\s*(?:\d+[.)]\s*)?", " ", text, flags=re.MULTILINE)
+
+    # Usuwanie znaczników list numerowanych (np. 1., 1), - 1., * 1., **1.**, (1))
+    text = re.sub(r"^\s*(?:[-*+•]\s*)?(?:\*\*)?\d+[.)]\s*(?:\*\*)?\s*", " ", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*(?:[-*+•]\s*)?\(\d+\)\s*", " ", text, flags=re.MULTILINE)
+
+    # Usuwanie etykiet kroków/wariantów/zadań (np. Krok 1:, Punkt 2., Zadanie 1:, Wariant 1:)
+    text = re.sub(
+        r"(?:\b|\s)(?:Krok|Kroki|Punkt|Punkty|Zadanie|Zadania|Wariant|Warianty|Opcja|Opcje|Etap|Etapy)\s+\d+(?:[:.)\s]|\b)",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # Usuwanie numeracji wewnątrz tekstu po interpunkcji (np. „kroki: 1. ... 2. ...”)
+    text = re.sub(r"(?<=[,.;:\n])\s*(?:[-*+•]\s*)?\d+[.)]\s+", " ", text)
+
+    # Usuwanie oznaczeń wersji / PoC (np. PoC v1, PoC v2, wersja 1.0)
+    text = re.sub(r"\b(?:PoC\s+)?v\d+(?:\.\d+)?\b", " ", text, flags=re.IGNORECASE)
+
+    # Usuwanie pozostałych symboli F#
+    text = re.sub(r"\bF\d+\b", " ", text, flags=re.IGNORECASE)
+
+    return text
+
+
+def _extract_instances(text: str) -> tuple[set[str], str]:
+    """Wyszukuje identyfikatory spraw (np. REK-2026-0412, FAK-2026-1162)."""
+    instances: set[str] = set()
+
+    def _replace_inst(m: re.Match) -> str:
+        val = m.group(0).upper()
+        instances.add(val)
+        return " "
+
+    text = re.sub(r"\b[A-Za-z]{2,6}-\d{4}-\d{4}\b", _replace_inst, text)
+    return instances, text
+
+
+def _extract_times(text: str) -> tuple[set[str], str]:
+    """Wyszukuje i normalizuje godziny (np. 11:30, 11:30:00, godz. 11.30)."""
+    times: set[str] = set()
+
+    def _replace_time_colon(m: re.Match) -> str:
+        h, mn = m.group(1), m.group(2)
+        times.add(f"{h}:{mn}")
+        return " "
+
+    # Godziny z dwukropkiem (11:30, 11:30:00)
+    text = re.sub(r"\b(\d{1,2}):(\d{2})(?::\d{2})?\b", _replace_time_colon, text)
+
+    # Godziny z kropką po słowie godz./godzinie/o godz./g. (np. o godz. 11.30, godz. 11.30)
+    def _replace_time_dot(m: re.Match) -> str:
+        h, mn = m.group(1), m.group(2)
+        times.add(f"{h}:{mn}")
+        return " "
+
+    text = re.sub(r"\b(?:godz(?:inie|\.)?\s+|g\.\s*|o\s+godz(?:inie|\.)?\s*)(\d{1,2})\.(\d{2})\b", _replace_time_dot, text, flags=re.IGNORECASE)
+
+    return times, text
+
+
+def _extract_dates(text: str) -> tuple[set[str], str]:
+    """Wyszukuje i normalizuje daty (np. 21.10.2026, 21.10, 2026-10-21)."""
+    dates: set[str] = set()
+
+    # 1. Daty w formacie ISO (YYYY-MM-DD) -> zamiana na DD.MM.YYYY
+    def _replace_iso_date(m: re.Match) -> str:
+        y, mm, dd = m.group(1), m.group(2), m.group(3)
+        formatted = f"{int(dd):02d}.{int(mm):02d}.{y}"
+        dates.add(formatted)
+        return " "
+
+    text = re.sub(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", _replace_iso_date, text)
+
+    # 2. Daty standardowe DD.MM.YYYY lub DD.MM (z kropkami)
+    def _replace_std_date(m: re.Match) -> str:
+        val = m.group(0)
+        dates.add(val)
+        return " "
+
+    text = re.sub(r"\b\d{1,2}\.\d{1,2}(?:\.\d{4})?\b", _replace_std_date, text)
+    return dates, text
+
+
+def _parse_num(val: str) -> float | None:
+    try:
+        return float(val.replace(",", "."))
+    except (ValueError, TypeError):
+        return None
+
+
+def _tokens(text: str, is_allowed_source: bool = False) -> dict[str, set[str]]:
+    text = _clean_formatting_and_markers(text)
+
+    # 1. Wyciągamy identyfikatory spraw
+    instances, text = _extract_instances(text)
+    found: dict[str, set[str]] = {"instance": instances}
+
+    # 2. Wyciągamy godziny z prefiksem lub dwukropkiem PRZED ogólnymi datami
+    times, text = _extract_times(text)
+    found["time"] = times
+
+    # 3. Wyciągamy daty
+    dates, text = _extract_dates(text)
+    found["date"] = dates
+
+    # 4. Wyciągamy liczby
+    raw_numbers = NUMBER_RE.findall(text)
+    numbers: set[str] = {n.replace(".", ",") for n in raw_numbers}
+
+    # Normalizacja liczb zmiennoprzecinkowych (np. 4.0 -> 4)
+    for n in list(numbers):
+        num_f = _parse_num(n)
+        if num_f is not None:
+            if num_f.is_integer():
+                numbers.add(str(int(num_f)))
+            else:
+                numbers.add(f"{num_f:g}".replace(".", ","))
+
+    # Dla dozwolonego źródła dodajemy pod-tokeny (składowe spraw oraz słowa oznaczające brak/0)
+    if is_allowed_source:
+        for inst in instances:
+            for part in re.findall(r"\d+", inst):
+                numbers.add(part)
+                num_f = _parse_num(part)
+                if num_f is not None:
+                    numbers.add(str(int(num_f)))
+
+        # Słowa oznaczające brak / 0
+        if re.search(r"\b(?:brak(?:u|iem)?|brakujące|nie wykryto|żadnych|zero)\b", text, re.IGNORECASE):
+            numbers.add("0")
+
+    found["number"] = numbers
     return found
 
 
-def check_draft(draft: str, facts: list[Fact], question: str, user_id: str) -> list[str]:
+def check_draft(draft: str, facts: list[Fact], question: str = "", user_id: str = "u_system",
+                extra_context: list[str] | str | None = None) -> list[str]:
     """Zwraca listę problemów (pusta = odpowiedź przechodzi weryfikację)."""
+    normalized_draft = normalize_citations(draft)
     problems: list[str] = []
     fact_ids = {f["id"] for f in facts}
-    allowed = _tokens(" ".join(f["text"] for f in facts) + " " + question)
-    got = _tokens(draft)
 
-    unknown_refs = sorted(set(CITATION_RE.findall(draft)) - fact_ids)
+    allowed_parts = [f["text"] for f in facts] + [question]
+    if extra_context:
+        if isinstance(extra_context, str):
+            allowed_parts.append(extra_context)
+        elif isinstance(extra_context, (list, tuple, set)):
+            allowed_parts.extend(str(x) for x in extra_context if x)
+
+    allowed = _tokens(" ".join(allowed_parts), is_allowed_source=True)
+    got = _tokens(normalized_draft, is_allowed_source=False)
+
+    unknown_refs = sorted(set(CITATION_RE.findall(normalized_draft)) - fact_ids)
     if unknown_refs:
         problems.append("odnośniki do nieistniejących faktów: " + ", ".join(unknown_refs))
-    if facts and not CITATION_RE.search(draft):
+    if facts and not CITATION_RE.search(normalized_draft):
         problems.append("brak odnośników [F#] do faktów")
-    for kind, label in (("instance", "numery spraw"), ("date", "daty"), ("time", "godziny"), ("number", "liczby")):
-        extra = sorted(got[kind] - allowed[kind])
-        if extra:
-            problems.append(f"{label} bez pokrycia w danych: " + ", ".join(extra))
+
+    # Sprawdzenie spraw
+    extra_instances = sorted(got["instance"] - allowed["instance"])
+    if extra_instances:
+        problems.append("numery spraw bez pokrycia w danych: " + ", ".join(extra_instances))
+
+    # Sprawdzenie dat
+    extra_dates = sorted(got["date"] - allowed["date"])
+    if extra_dates:
+        problems.append("daty bez pokrycia w danych: " + ", ".join(extra_dates))
+
+    # Sprawdzenie godzin
+    extra_times = sorted(got["time"] - allowed["time"])
+    if extra_times:
+        problems.append("godziny bez pokrycia w danych: " + ", ".join(extra_times))
+
+    # Sprawdzenie liczb (z tolerancją na równoważność numeryczną)
+    allowed_numeric_vals = {_parse_num(n) for n in allowed["number"] if _parse_num(n) is not None}
+    extra_numbers = []
+    for num_str in sorted(got["number"]):
+        num_f = _parse_num(num_str)
+        if num_str not in allowed["number"] and (num_f is None or num_f not in allowed_numeric_vals):
+            extra_numbers.append(num_str)
+
+    if extra_numbers:
+        problems.append("liczby bez pokrycia w danych: " + ", ".join(extra_numbers))
+
     user = get_user(user_id)
     forbidden = sorted(i for i in got["instance"] if not can_view_instance(user, i))
     if forbidden:
         problems.append("numery spraw spoza uprawnień: " + ", ".join(forbidden))
+
     return problems
 
 
@@ -123,10 +414,24 @@ def compose(state: AssistantState, facts: list[Fact], lead: str, actions: list[s
            + "\n\nAkcje sugerowane:\n" + ("\n".join(f"- {a}" for a in actions) or "(brak)"))
     if feedback:
         msg += f"\n\nPoprzednia wersja nie przeszła weryfikacji: {feedback}\nPopraw odpowiedź."
+    on_token = state.get("on_token")
     try:
-        result = llm.invoke([("system", EVENT_PROMPT if event_mode else COMPOSE_PROMPT), ("user", msg)])
-        content = result.content if isinstance(result.content, str) else "".join(
-            part.get("text", "") for part in result.content if isinstance(part, dict))
+        messages = [("system", EVENT_PROMPT if event_mode else COMPOSE_PROMPT), ("user", msg)]
+        if hasattr(llm, "stream"):
+            chunks: list[str] = []
+            for chunk in llm.stream(messages):
+                text = chunk.content if isinstance(chunk.content, str) else "".join(
+                    part.get("text", "") for part in chunk.content if isinstance(part, dict))
+                chunks.append(text)
+                if on_token and callable(on_token) and text:
+                    on_token(text)
+            content = "".join(chunks)
+        else:
+            result = llm.invoke(messages)
+            content = result.content if isinstance(result.content, str) else "".join(
+                part.get("text", "") for part in result.content if isinstance(part, dict))
+            if on_token and callable(on_token) and content:
+                on_token(content)
         return content.strip(), "LLM"
     except Exception as exc:
         log.warning("Składanie odpowiedzi przez LLM nie powiodło się, używam szablonu: %s", exc)
@@ -146,7 +451,9 @@ def editor_verifier_node(state: AssistantState) -> AssistantState:
         return {"answer": answer, "verdict": verdict, "sources": [], "numbered_facts": [],
                 "trace": [{"agent": "Redaktor-Weryfikator",
                            "summary": f"{'Odmowa przekazana' if verdict == 'refused' else 'Komunikat przekazany'} "
-                                      "bez udziału modelu.", "ms": elapsed_ms(started)}]}
+                                      "bez udziału modelu.", "ms": elapsed_ms(started),
+                           "details": {"verdict": verdict, "decision": decision,
+                                       "decision_reason": state.get("decision_reason", "")}}]}
 
     facts = merge_facts(state.get("facts", []))
     lead = pick_lead(state.get("leads", []))
@@ -154,9 +461,19 @@ def editor_verifier_node(state: AssistantState) -> AssistantState:
     recs = _dedupe(state.get("recommendations", []))
     question = state.get("question", "")
     steps, feedback, problems, draft, method = [], "", [], "", ""
+    attempts_details: list[dict] = []
     for attempt in range(1, MAX_ATTEMPTS + 1):
         draft, method = compose(state, facts, lead, actions, recs, feedback)
-        problems = check_draft(draft, facts, question, state["user_id"])
+        draft = normalize_citations(draft)
+        problems = check_draft(draft, facts, question, state["user_id"],
+                               extra_context=[lead] + actions + recs + [state.get("context_instance_id") or ""])
+        attempts_details.append({
+            "attempt": attempt,
+            "method": method,
+            "draft": draft,
+            "problems": list(problems),
+            "accepted": not bool(problems),
+        })
         if not problems:
             break
         feedback = "; ".join(problems)
@@ -169,11 +486,15 @@ def editor_verifier_node(state: AssistantState) -> AssistantState:
         return {**base, "answer": draft, "verdict": "ok", "sources": [f for f in facts if f["id"] in cited] or facts,
                 "trace": [{"agent": "Redaktor-Weryfikator",
                            "summary": f"Złożył odpowiedź ({method}, {len(facts)} faktów). Zgodność z danymi: OK "
-                                      f"({len(cited)} odnośników). Uprawnienia: OK.{fixes}", "ms": elapsed_ms(started)}]}
+                                      f"({len(cited)} odnośników). Uprawnienia: OK.{fixes}", "ms": elapsed_ms(started),
+                           "details": {"verdict": "ok", "attempts_count": attempt,
+                                       "attempts": attempts_details, "rejection_reasons": steps}}]}
 
     safe = template_answer(lead, facts, actions, recs)
     note = "\n\n_Weryfikator zablokował tekst modelu (brak pokrycia w danych) i pokazuje same fakty._"
     return {**base, "answer": safe + note, "verdict": "blocked", "sources": facts,
             "trace": [{"agent": "Redaktor-Weryfikator",
                        "summary": f"Zablokował tekst modelu po {MAX_ATTEMPTS} próbach ({'; '.join(steps)}). "
-                                  "Zwrócił wersję faktograficzną.", "ms": elapsed_ms(started)}]}
+                                  "Zwrócił wersję faktograficzną.", "ms": elapsed_ms(started),
+                       "details": {"verdict": "blocked", "attempts_count": MAX_ATTEMPTS,
+                                   "attempts": attempts_details, "rejection_reasons": steps}}]}

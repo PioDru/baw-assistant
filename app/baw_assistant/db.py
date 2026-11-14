@@ -130,7 +130,7 @@ DEFAULT_SETTINGS = {
     "queue_delay_s": "300",
     "step_growth_pct": "50",
     "slow_response_warnings_24h": "5",
-    "scan_interval_min": "5",
+    "scan_interval_min": "30",
 }
 
 

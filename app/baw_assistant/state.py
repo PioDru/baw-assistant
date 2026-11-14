@@ -26,10 +26,11 @@ class Lead(TypedDict):
     priority: int  # 0 = najważniejszy (np. awaria), 1 = główny wniosek, 2 = tło
 
 
-class TraceStep(TypedDict):
+class TraceStep(TypedDict, total=False):
     agent: str
     summary: str
     ms: int
+    details: dict[str, Any]
 
 
 class AssistantState(TypedDict, total=False):
@@ -41,6 +42,7 @@ class AssistantState(TypedDict, total=False):
     context_instance_id: str | None
     params: dict[str, Any]         # np. proces i okres dla raportu analitycznego
     event: dict[str, Any]          # zdarzenie z kolejki (tryb systemowy)
+    on_token: Any                  # opcjonalny callback wywoływany dla każdego wygenerowanego tokenu
     # Dyspozytor
     intent: str
     decision: str                  # route | refuse | need_context | not_available | not_found | disabled

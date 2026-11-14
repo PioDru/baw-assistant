@@ -4,6 +4,16 @@ Uruchomienie lokalne:  streamlit run streamlit_app.py
 """
 from __future__ import annotations
 
+import logging
+import sys
+
+# Konfiguracja logowania dla aplikacji Streamlit, aby logi trafiały do strumienia Dockera
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    stream=sys.stdout,
+)
+
 import streamlit as st
 
 from baw_assistant import db, kb
