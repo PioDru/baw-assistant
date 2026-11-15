@@ -209,7 +209,7 @@ def test_profiles_pass_verifier_when_grounded(profile: SimulatedModelProfile):
     ("W sprawie zidentyfikowano 5 zaległych zadań [F3].", "liczby bez pokrycia"),
     # 2. Zmiana formatu daty lub zmyślona data
     ("Termin upływa 25.10.2026 [F1].", "daty bez pokrycia"),
-    ("Termin mija 21.10 [F1].", "daty bez pokrycia"),
+    ("Termin mija 25.10 [F1].", "daty bez pokrycia"),
     # 3. Brak jakichkolwiek odnośników [F#]
     ("Sprawa REK-2026-0412 stoi od 4 dni z powodu braku Protokołu szkody.", "brak odnośników"),
     # 4. Zmyślony identyfikator faktu

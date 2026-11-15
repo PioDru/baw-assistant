@@ -9,9 +9,13 @@ W trybie systemowym ta sama treść staje się powiadomieniem (wysyła je węze�
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..llm import get_llm
 from ..rbac import can_view_instance, get_user
@@ -32,13 +36,98 @@ LIST_MARKER_RE = re.compile(r"^\s*\d+[.)]\s", re.MULTILINE)
 DECISION_PREFIX = {"refuse": "Nie mogę odpowiedzieć na to pytanie.", "need_context": "Potrzebuję kontekstu.",
                    "not_found": "Nie znalazłem tej sprawy.", "disabled": "Ta funkcja jest chwilowo niedostępna."}
 
+
+class EditorResponse(BaseModel):
+    """Ustrukturyzowany schemat odpowiedzi Redaktora walidowany przez Pydantic."""
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    summary: str = Field(
+        default="",
+        description="Główna odpowiedź lub wniosek z odnośnikami [F#] do faktów"
+    )
+    used_facts: list[str] = Field(
+        default_factory=list,
+        description="Lista identyfikatorów użytych faktów, np. ['F1', 'F2']"
+    )
+    recommendations: list[str] = Field(
+        default_factory=list,
+        description="Rekomendacje dla użytkownika na podstawie faktów"
+    )
+    suggested_actions: list[str] = Field(
+        default_factory=list,
+        description="Sugerowane kroki / akcje do wykonania"
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_payload(cls, data: Any) -> Any:
+        if isinstance(data, str):
+            trimmed = data.strip()
+            # Obsługa bloków kodu Markdown ```json ... ```
+            code_block_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", trimmed, re.DOTALL)
+            if code_block_match:
+                try:
+                    data = json.loads(code_block_match.group(1))
+                except Exception:
+                    return {"summary": trimmed}
+            elif trimmed.startswith("{") and trimmed.endswith("}"):
+                try:
+                    data = json.loads(trimmed)
+                except Exception:
+                    return {"summary": trimmed}
+            else:
+                return {"summary": trimmed}
+
+        if not isinstance(data, dict):
+            return data
+
+        res = dict(data)
+        for key in ["direct_answer", "answer", "odpowiedz", "podsumowanie", "tekst", "text", "content"]:
+            if key in res and "summary" not in res:
+                res["summary"] = res.pop(key)
+        for key in ["facts", "fakty", "uzyte_fakty", "citations", "zrodla", "sources"]:
+            if key in res and "used_facts" not in res:
+                res["used_facts"] = res.pop(key)
+        for key in ["rekomendacje", "recommendation"]:
+            if key in res and "recommendations" not in res:
+                res["recommendations"] = res.pop(key)
+        for key in ["actions", "kroki", "akcje", "sugerowane_kroki", "sugerowane_akcje", "steps"]:
+            if key in res and "suggested_actions" not in res:
+                res["suggested_actions"] = res.pop(key)
+        return res
+
+    def to_formatted_text(self) -> str:
+        parts: list[str] = []
+        if self.summary:
+            parts.append(self.summary.strip())
+        if self.recommendations:
+            parts.append("Rekomendacje:\n" + "\n".join(f"- {r}" for r in self.recommendations))
+        if self.suggested_actions:
+            parts.append("Sugerowane kroki:\n" + "\n".join(f"{i}. {a}" for i, a in enumerate(self.suggested_actions, 1)))
+        return "\n\n".join(parts) if parts else self.summary
+
+
+def parse_editor_response(raw: Any) -> tuple[EditorResponse, str]:
+    """Waliduje odpowiedź z wykorzystaniem schematu Pydantic EditorResponse."""
+    if isinstance(raw, EditorResponse):
+        return raw, "LLM"
+    try:
+        validated = EditorResponse.model_validate(raw)
+        return validated, "LLM"
+    except Exception as exc:
+        log.warning("Błąd walidacji schematu Pydantic dla odpowiedzi: %s", exc)
+        if isinstance(raw, str):
+            return EditorResponse(summary=raw), "LLM"
+        return EditorResponse(summary=str(raw)), "LLM"
+
+
 COMPOSE_PROMPT = """Jesteś Redaktorem-Weryfikatorem w asystencie operacyjnym IBM BAW. Składasz zwięzłą odpowiedź po polsku
 (do ok. 150 słów) wyłącznie na podstawie podanych faktów.
 
 KRYTYCZNE ZASADY SPÓJNOŚCI DANYCH:
 1. UŻYWAJ WYŁĄCZNIE DANYCH Z FAKTÓW:
    - Nie dodawaj żadnych własnych liczb, dat, godzin, wyliczeń, statystyk ani numerów spraw.
-   - Przepisuj liczby i daty DOKŁADNIE w takim formacie, w jakim występują w faktach (np. „21.10.2026”, nie „21 października”).
+   - Przepisuj liczby i daty w zgodzie z faktami.
    - Nie twórz własnych sumarycznych statystyk (np. nie pisz „masz łącznie 3 zadania”, jeśli w faktach nie ma liczby 3).
 
 2. OBOWIĄZKOWE PRZYPISY [F#]:
@@ -49,6 +138,7 @@ KRYTYCZNE ZASADY SPÓJNOŚCI DANYCH:
    - Zacznij od bezpośredniej odpowiedzi (wniosek główny), po czym przedstaw najważniejsze szczegóły.
    - Jeśli podano rekomendacje, umieść je na końcu w sekcji „Rekomendacje:” (lista punktowana, bez dopisywania nowych liczb).
    - Jeśli podano akcje sugerowane, umieść je w sekcji „Sugerowane kroki:” (dokładna lista podanych akcji).
+   - Dopuszczalny jest format JSON zgodny ze schematem: {"summary": "...", "used_facts": ["F1", ...], "recommendations": [...], "suggested_actions": [...]}.
 
 4. Po sformułowaniu odpowiedzi natychmiast zakończ generowanie.
 
@@ -76,12 +166,32 @@ Odpowiedź: Skan cykliczny zakończony pomyślnie – nie wykryto nowych alertó
 # --- weryfikacja ----------------------------------------------------------------------
 
 POLISH_MONTHS = {
-    "stycznia": "01", "styczeń": "01", "lutego": "02", "luty": "02",
-    "marca": "03", "marzec": "03", "kwietnia": "04", "kwiecień": "04",
-    "maja": "05", "maj": "05", "czerwca": "06", "czerwiec": "06",
-    "lipca": "07", "lipiec": "07", "sierpnia": "08", "sierpień": "08",
-    "września": "09", "wrzesień": "09", "października": "10", "październik": "10",
-    "listopada": "11", "listopad": "11", "grudnia": "12", "grudzień": "12",
+    "stycznia": "01", "styczeń": "01", "styczniu": "01",
+    "lutego": "02", "luty": "02", "lutym": "02",
+    "marca": "03", "marzec": "03", "marcu": "03",
+    "kwietnia": "04", "kwiecień": "04", "kwietniu": "04",
+    "maja": "05", "maj": "05", "maju": "05",
+    "czerwca": "06", "czerwiec": "06", "czerwcu": "06",
+    "lipca": "07", "lipiec": "07", "lipcu": "07",
+    "sierpnia": "08", "sierpień": "08", "sierpniu": "08",
+    "września": "09", "wrzesień": "09", "wrzesniu": "09", "wrześniu": "09",
+    "października": "10", "październik": "10", "pazdziernika": "10", "październiku": "10", "pazdzierniku": "10",
+    "listopada": "11", "listopad": "11", "listopadzie": "11",
+    "grudnia": "12", "grudzień": "12", "grudniu": "12", "grudzien": "12",
+}
+
+POLISH_WORD_NUMBERS = {
+    "zero": "0", "zerem": "0", "zerze": "0",
+    "jeden": "1", "jedna": "1", "jedno": "1", "jednego": "1", "jednej": "1", "jednym": "1", "jedną": "1",
+    "dwa": "2", "dwie": "2", "dwóch": "2", "dwoch": "2", "dwom": "2", "dwoma": "2", "dwiema": "2",
+    "trzy": "3", "trzech": "3", "trzem": "3", "trzema": "3",
+    "cztery": "4", "czterech": "4", "czterem": "4", "czterema": "4",
+    "pięć": "5", "piec": "5", "pięciu": "5", "pieciu": "5", "pięcioma": "5",
+    "sześć": "6", "szesc": "6", "sześciu": "6", "szesciu": "6", "sześcioma": "6",
+    "siedem": "7", "siedmiu": "7", "siedmioma": "7",
+    "osiem": "8", "ośmiu": "8", "osmiu": "8", "ośmioma": "8", "osmioma": "8",
+    "dziewięć": "9", "dziewiec": "9", "dziewięciu": "9", "dziewieciu": "9", "dziewięcioma": "9",
+    "dziesięć": "10", "dziesiec": "10", "dziesięciu": "10", "dziesieciu": "10", "dziesięcioma": "10",
 }
 
 def normalize_citations(text: str) -> str:
@@ -201,6 +311,10 @@ def _clean_formatting_and_markers(text: str) -> str:
     # Usuwanie oznaczeń wersji / PoC (np. PoC v1, PoC v2, wersja 1.0)
     text = re.sub(r"\b(?:PoC\s+)?v\d+(?:\.\d+)?\b", " ", text, flags=re.IGNORECASE)
 
+    # Usuwanie procentów i zwrotów typu 100%, 0%, 24/7
+    text = re.sub(r"\b\d+(?:[.,]\d+)?\s*%", " ", text)
+    text = re.sub(r"\b24/7\b", " ", text)
+
     # Usuwanie pozostałych symboli F#
     text = re.sub(r"\bF\d+\b", " ", text, flags=re.IGNORECASE)
 
@@ -244,22 +358,50 @@ def _extract_times(text: str) -> tuple[set[str], str]:
 
 
 def _extract_dates(text: str) -> tuple[set[str], str]:
-    """Wyszukuje i normalizuje daty (np. 21.10.2026, 21.10, 2026-10-21)."""
+    """Wyszukuje i normalizuje daty (np. 21.10.2026, 21.10, 2026-10-21, 21 października 2026)."""
     dates: set[str] = set()
 
-    # 1. Daty w formacie ISO (YYYY-MM-DD) -> zamiana na DD.MM.YYYY
+    # 1. Daty w formacie słownym z polskim miesiącem: np. 21 października 2026, 14 października
+    month_pattern = "|".join(POLISH_MONTHS.keys())
+
+    def _replace_named_month(m: re.Match) -> str:
+        dd, m_name, yyyy = m.group(1), m.group(2).lower(), m.group(3)
+        mm = POLISH_MONTHS.get(m_name, "01")
+        if yyyy:
+            formatted = f"{int(dd):02d}.{mm}.{yyyy}"
+            short_formatted = f"{int(dd):02d}.{mm}"
+            dates.add(formatted)
+            dates.add(short_formatted)
+        else:
+            short_formatted = f"{int(dd):02d}.{mm}"
+            dates.add(short_formatted)
+        return " "
+
+    text = re.sub(
+        rf"\b(\d{{1,2}})\.?(?:\s+dzień\s+)?\s+({month_pattern})(?:\s+(\d{{4}}))?\b",
+        _replace_named_month,
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    # 2. Daty w formacie ISO (YYYY-MM-DD) -> zamiana na DD.MM.YYYY i DD.MM
     def _replace_iso_date(m: re.Match) -> str:
         y, mm, dd = m.group(1), m.group(2), m.group(3)
         formatted = f"{int(dd):02d}.{int(mm):02d}.{y}"
+        short_formatted = f"{int(dd):02d}.{int(mm):02d}"
         dates.add(formatted)
+        dates.add(short_formatted)
         return " "
 
     text = re.sub(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", _replace_iso_date, text)
 
-    # 2. Daty standardowe DD.MM.YYYY lub DD.MM (z kropkami)
+    # 3. Daty standardowe DD.MM.YYYY lub DD.MM (z kropkami)
     def _replace_std_date(m: re.Match) -> str:
         val = m.group(0)
         dates.add(val)
+        parts = val.split(".")
+        if len(parts) == 3:
+            dates.add(f"{int(parts[0]):02d}.{int(parts[1]):02d}")
         return " "
 
     text = re.sub(r"\b\d{1,2}\.\d{1,2}(?:\.\d{4})?\b", _replace_std_date, text)
@@ -288,9 +430,18 @@ def _tokens(text: str, is_allowed_source: bool = False) -> dict[str, set[str]]:
     dates, text = _extract_dates(text)
     found["date"] = dates
 
-    # 4. Wyciągamy liczby
+    # 4. Wyciągamy liczby słowne i zamieniamy na cyfry
+    word_pattern = r"\b(" + "|".join(POLISH_WORD_NUMBERS.keys()) + r")\b"
+    word_numbers: set[str] = set()
+    for w in re.findall(word_pattern, text, flags=re.IGNORECASE):
+        d = POLISH_WORD_NUMBERS.get(w.lower())
+        if d:
+            word_numbers.add(d)
+    text = re.sub(word_pattern, " ", text, flags=re.IGNORECASE)
+
+    # 5. Wyciągamy liczby
     raw_numbers = NUMBER_RE.findall(text)
-    numbers: set[str] = {n.replace(".", ",") for n in raw_numbers}
+    numbers: set[str] = {n.replace(".", ",") for n in raw_numbers} | word_numbers
 
     # Normalizacja liczb zmiennoprzecinkowych (np. 4.0 -> 4)
     for n in list(numbers):
@@ -432,7 +583,9 @@ def compose(state: AssistantState, facts: list[Fact], lead: str, actions: list[s
                 part.get("text", "") for part in result.content if isinstance(part, dict))
             if on_token and callable(on_token) and content:
                 on_token(content)
-        return content.strip(), "LLM"
+        parsed_resp, method = parse_editor_response(content)
+        formatted = parsed_resp.to_formatted_text()
+        return (formatted.strip() or content.strip()), method
     except Exception as exc:
         log.warning("Składanie odpowiedzi przez LLM nie powiodło się, używam szablonu: %s", exc)
         return template_answer(lead, facts, actions, recs), "szablon"

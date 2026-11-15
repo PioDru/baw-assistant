@@ -6,7 +6,13 @@ from types import SimpleNamespace
 import pytest
 
 from baw_assistant.agents import dispatcher, editor_verifier
-from baw_assistant.agents.editor_verifier import COMPOSE_PROMPT, check_draft, normalize_citations
+from baw_assistant.agents.editor_verifier import (
+    COMPOSE_PROMPT,
+    EditorResponse,
+    check_draft,
+    normalize_citations,
+    parse_editor_response,
+)
 from baw_assistant.graph import ask
 
 FACTS = [{"id": "F1", "text": "Termin SLA: 21.10.2026, zostały 3 dni.", "source": "instancje"},
@@ -192,6 +198,81 @@ def test_llm_cannot_leak_other_instance(monkeypatch):
     _patch(monkeypatch, llm)
     result = ask("Dlaczego ta sprawa stoi?", "u_anna", "pracownik", "REK-2026-0412")
     assert result["verdict"] == "blocked" and "REK-2026-0377" not in result["answer"]
+
+
+def test_pydantic_editor_response_schema_validation():
+    """Weryfikuje poprawną walidację i normalizację różnych struktur przez Pydantic EditorResponse."""
+    # 1. Standardowy poprawny słownik
+    data = {
+        "summary": "Sprawa REK-2026-0412 wymaga pilnej akcji [F1].",
+        "used_facts": ["F1"],
+        "recommendations": ["Rekomendacja 1"],
+        "suggested_actions": ["Krok 1"],
+    }
+    resp = EditorResponse.model_validate(data)
+    assert resp.summary == "Sprawa REK-2026-0412 wymaga pilnej akcji [F1]."
+    assert resp.used_facts == ["F1"]
+    assert "Rekomendacje:\n- Rekomendacja 1" in resp.to_formatted_text()
+    assert "Sugerowane kroki:\n1. Krok 1" in resp.to_formatted_text()
+
+    # 2. Polskie synonimy kluczy (odpowiedź / uzyte_fakty / akcje)
+    pl_data = {
+        "odpowiedz": "Wszystko w porządku [F1].",
+        "uzyte_fakty": ["F1"],
+        "sugerowane_kroki": ["Działanie A"],
+    }
+    pl_resp = EditorResponse.model_validate(pl_data)
+    assert pl_resp.summary == "Wszystko w porządku [F1]."
+    assert pl_resp.used_facts == ["F1"]
+    assert "Sugerowane kroki:\n1. Działanie A" in pl_resp.to_formatted_text()
+
+    # 3. Parsowanie z formatu JSON w bloku markdown ```json ... ```
+    raw_json_block = """```json
+    {
+        "podsumowanie": "Brak opóźnień [F2].",
+        "fakty": ["F2"]
+    }
+    ```"""
+    parsed_resp, method = parse_editor_response(raw_json_block)
+    assert parsed_resp.summary == "Brak opóźnień [F2]."
+    assert parsed_resp.used_facts == ["F2"]
+
+    # 4. Parsowanie zwykłego tekstu jako fallback
+    plain_text = "Zwykła odpowiedź tekstowa [F1]."
+    plain_resp, method = parse_editor_response(plain_text)
+    assert plain_resp.summary == plain_text
+
+
+@pytest.mark.parametrize("draft", [
+    "Sprawa stoi od 4 dni [F2]. Termin SLA: 21 października 2026 [F1].",
+    "Sprawa stoi od czterech dni [F2]. Termin SLA: 21.10.2026 [F1].",
+    "Sprawa stoi od dwóch dni [F1].",
+    "Sprawa REK-2026-0412 ma 100% poprawnych danych [F1].",
+    "Dostępność systemu wynosi 24/7 [F1].",
+])
+def test_hybrid_verifier_natural_language_and_word_numbers_pass(draft: str):
+    """Weryfikuje, że weryfikator hybrydowy toleruje polskie nazwy miesięcy, liczebniki słowne i zwroty standardowe."""
+    facts = [
+        {"id": "F1", "text": "Sprawa REK-2026-0412: termin SLA: 21.10.2026, zostały 2 dni.", "source": "instancje"},
+        {"id": "F2", "text": "Ostatnia zmiana w sprawie: 14.10.2026 11:30, czyli 4 dni temu.", "source": "historia zdarzeń"},
+    ]
+    assert check_draft(draft, facts, "Jaki jest status?", "u_anna") == []
+
+
+def test_llm_json_structured_output_pipeline(monkeypatch):
+    """Weryfikuje, że gdy model zwraca JSON, jest on poprawnie parsowany przez Pydantic i akceptowany."""
+    json_reply = """{
+        "summary": "Sprawa REK-2026-0412 czeka na decyzję [F1].",
+        "used_facts": ["F1"],
+        "suggested_actions": ["Kontakt z klientem"]
+    }"""
+    llm = FakeLLM([json_reply])
+    _patch(monkeypatch, llm)
+    result = ask("Dlaczego ta sprawa stoi?", "u_anna", "pracownik", "REK-2026-0412")
+    assert result["verdict"] == "ok"
+    assert "Sprawa REK-2026-0412 czeka na decyzję [F1]." in result["answer"]
+    assert "Sugerowane kroki:\n1. Kontakt z klientem" in result["answer"]
+    assert {f["id"] for f in result["sources"]} == {"F1"}
 
 
 def test_render_answer_blocked_shows_blocked_draft_expander(monkeypatch):

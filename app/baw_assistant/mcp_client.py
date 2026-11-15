@@ -5,8 +5,10 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 from .config import get_settings
@@ -46,10 +48,19 @@ async def get_internal_mcp_session() -> AsyncIterator[Any]:
         settings.mcp_local_command,
         " ".join(settings.mcp_local_args),
     )
+    env = dict(os.environ)
+    app_dir = str(Path(__file__).resolve().parent.parent)
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{app_dir}{os.pathsep}{existing_pythonpath}" if existing_pythonpath else app_dir
+
+    command = settings.mcp_local_command
+    if command == "python" and sys.executable:
+        command = sys.executable
+
     server_params = StdioServerParameters(
-        command=settings.mcp_local_command,
+        command=command,
         args=settings.mcp_local_args,
-        env=dict(os.environ),
+        env=env,
     )
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
