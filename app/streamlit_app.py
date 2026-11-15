@@ -70,6 +70,8 @@ nav = st.navigation(pages, position="sidebar")
 with st.sidebar:
     st.divider()
     st.caption(f"Model: {llm_label()}")
+    if st.session_state.get("actual_model"):
+        st.caption(f"Ostatnio użyty: {st.session_state['actual_model']}")
     if llm_error():
         st.warning("Model LLM niedostępny – agenci działają na regułach i szablonach. "
                    "Sprawdź OPENAI_API_KEY i LLM_MODEL w pliku .env.", icon=":material/warning:")

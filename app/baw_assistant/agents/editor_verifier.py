@@ -17,7 +17,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..llm import get_llm
+from ..llm import extract_model_name, get_llm
 from ..rbac import can_view_instance, get_user
 from ..state import AssistantState, Fact
 from .common import AGENT_ORDER, elapsed_ms
@@ -552,11 +552,11 @@ def template_answer(lead: str, facts: list[Fact], actions: list[str], recommenda
 
 
 def compose(state: AssistantState, facts: list[Fact], lead: str, actions: list[str], recs: list[str],
-            feedback: str = "") -> tuple[str, str]:
-    """Zwraca (tekst, metoda)."""
+            feedback: str = "") -> tuple[str, str, str | None]:
+    """Zwraca (tekst, metoda, użyty_model)."""
     llm = get_llm()
     if llm is None:
-        return template_answer(lead, facts, actions, recs), "szablon"
+        return template_answer(lead, facts, actions, recs), "szablon", None
     event_mode = state.get("mode") == "event"
     facts_txt = "\n".join(f"[{f['id']}] {f['text']}" for f in facts)
     msg = (f"{'Zdarzenie' if event_mode else 'Pytanie'}: {state.get('question', '')}\n"
@@ -566,29 +566,39 @@ def compose(state: AssistantState, facts: list[Fact], lead: str, actions: list[s
     if feedback:
         msg += f"\n\nPoprzednia wersja nie przeszła weryfikacji: {feedback}\nPopraw odpowiedź."
     on_token = state.get("on_token")
+    used_model: str | None = None
     try:
         messages = [("system", EVENT_PROMPT if event_mode else COMPOSE_PROMPT), ("user", msg)]
         if hasattr(llm, "stream"):
             chunks: list[str] = []
+            last_chunk = None
             for chunk in llm.stream(messages):
+                last_chunk = chunk
                 text = chunk.content if isinstance(chunk.content, str) else "".join(
                     part.get("text", "") for part in chunk.content if isinstance(part, dict))
                 chunks.append(text)
+                if not used_model:
+                    used_model = extract_model_name(chunk)
                 if on_token and callable(on_token) and text:
                     on_token(text)
             content = "".join(chunks)
+            if not used_model and last_chunk is not None:
+                used_model = extract_model_name(last_chunk, llm)
         else:
             result = llm.invoke(messages)
+            used_model = extract_model_name(result, llm)
             content = result.content if isinstance(result.content, str) else "".join(
                 part.get("text", "") for part in result.content if isinstance(part, dict))
             if on_token and callable(on_token) and content:
                 on_token(content)
+        if not used_model:
+            used_model = extract_model_name(None, llm)
         parsed_resp, method = parse_editor_response(content)
         formatted = parsed_resp.to_formatted_text()
-        return (formatted.strip() or content.strip()), method
+        return (formatted.strip() or content.strip()), method, used_model
     except Exception as exc:
         log.warning("Składanie odpowiedzi przez LLM nie powiodło się, używam szablonu: %s", exc)
-        return template_answer(lead, facts, actions, recs), "szablon"
+        return template_answer(lead, facts, actions, recs), "szablon", None
 
 
 def _dedupe(items: list[str]) -> list[str]:
@@ -602,6 +612,7 @@ def editor_verifier_node(state: AssistantState) -> AssistantState:
         answer = f"{DECISION_PREFIX[decision]} {state.get('decision_reason', '')}".strip()
         verdict = "refused" if decision == "refuse" else "info"
         return {"answer": answer, "verdict": verdict, "sources": [], "numbered_facts": [],
+                "model": None,
                 "trace": [{"agent": "Redaktor-Weryfikator",
                            "summary": f"{'Odmowa przekazana' if verdict == 'refused' else 'Komunikat przekazany'} "
                                       "bez udziału modelu.", "ms": elapsed_ms(started),
@@ -615,14 +626,18 @@ def editor_verifier_node(state: AssistantState) -> AssistantState:
     question = state.get("question", "")
     steps, feedback, problems, draft, method = [], "", [], "", ""
     attempts_details: list[dict] = []
+    last_model_used: str | None = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        draft, method = compose(state, facts, lead, actions, recs, feedback)
+        draft, method, model_name = compose(state, facts, lead, actions, recs, feedback)
+        if model_name:
+            last_model_used = model_name
         draft = normalize_citations(draft)
         problems = check_draft(draft, facts, question, state["user_id"],
                                extra_context=[lead] + actions + recs + [state.get("context_instance_id") or ""])
         attempts_details.append({
             "attempt": attempt,
             "method": method,
+            "model": model_name,
             "draft": draft,
             "problems": list(problems),
             "accepted": not bool(problems),
@@ -633,14 +648,15 @@ def editor_verifier_node(state: AssistantState) -> AssistantState:
         steps.append(f"próba {attempt}: {feedback}")
 
     cited = sorted(set(CITATION_RE.findall(draft)), key=lambda x: int(x[1:]))
-    base = {"numbered_facts": facts, "lead": lead, "draft": draft, "attempts": attempt}
+    base = {"numbered_facts": facts, "lead": lead, "draft": draft, "attempts": attempt, "model": last_model_used}
     if not problems:
         fixes = f" Poprawki: {len(steps)} ({'; '.join(steps)})." if steps else ""
         return {**base, "answer": draft, "verdict": "ok", "sources": [f for f in facts if f["id"] in cited] or facts,
                 "trace": [{"agent": "Redaktor-Weryfikator",
                            "summary": f"Złożył odpowiedź ({method}, {len(facts)} faktów). Zgodność z danymi: OK "
                                       f"({len(cited)} odnośników). Uprawnienia: OK.{fixes}", "ms": elapsed_ms(started),
-                           "details": {"verdict": "ok", "attempts_count": attempt,
+                           "model": last_model_used,
+                           "details": {"verdict": "ok", "attempts_count": attempt, "model": last_model_used,
                                        "attempts": attempts_details, "rejection_reasons": steps}}]}
 
     safe = template_answer(lead, facts, actions, recs)
@@ -649,5 +665,6 @@ def editor_verifier_node(state: AssistantState) -> AssistantState:
             "trace": [{"agent": "Redaktor-Weryfikator",
                        "summary": f"Zablokował tekst modelu po {MAX_ATTEMPTS} próbach ({'; '.join(steps)}). "
                                   "Zwrócił wersję faktograficzną.", "ms": elapsed_ms(started),
-                       "details": {"verdict": "blocked", "attempts_count": MAX_ATTEMPTS,
+                       "model": last_model_used,
+                       "details": {"verdict": "blocked", "attempts_count": MAX_ATTEMPTS, "model": last_model_used,
                                    "attempts": attempts_details, "rejection_reasons": steps}}]}

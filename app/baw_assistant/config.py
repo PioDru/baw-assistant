@@ -33,6 +33,9 @@ class Settings:
     mcp_docker_bearer_token: str
     mcp_local_command: str
     mcp_local_args: list[str]
+    local_fast_model: str = ""
+    local_moe_model: str = ""
+    fallback_cloud_model: str = ""
 
     @property
     def mock_llm(self) -> bool:
@@ -68,4 +71,7 @@ def get_settings() -> Settings:
         mcp_docker_bearer_token=_env("MCP_DOCKER_BEARER_TOKEN"),
         mcp_local_command=_env("MCP_LOCAL_COMMAND", "python"),
         mcp_local_args=[arg.strip() for arg in _env("MCP_LOCAL_ARGS", "-m,baw_assistant.mcp_server").split(",") if arg.strip()],
+        local_fast_model=_env("LOCAL_FAST_MODEL", ""),
+        local_moe_model=_env("LOCAL_MOE_MODEL", ""),
+        fallback_cloud_model=_env("FALLBACK_CLOUD_MODEL", ""),
     )

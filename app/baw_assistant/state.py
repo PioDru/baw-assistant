@@ -30,6 +30,7 @@ class TraceStep(TypedDict, total=False):
     agent: str
     summary: str
     ms: int
+    model: str | None
     details: dict[str, Any]
 
 
@@ -67,5 +68,6 @@ class AssistantState(TypedDict, total=False):
     answer: str
     sources: list[Fact]
     notifications: list[int]
+    model: str | None              # faktycznie wykorzystany model LLM
     # ślad
     trace: Annotated[list[TraceStep], operator.add]

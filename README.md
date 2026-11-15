@@ -43,7 +43,7 @@ docker compose up -d --build
 | --- | --- |
 | `app` | http://localhost:8501 – Streamlit |
 | `worker` | harmonogram skanów (co 5 min) i przetwarzanie kolejki zdarzeń (co 15 s) |
-| `litellm` | http://localhost:4000 – bramka LiteLLM Proxy (routing modeli MoE / Fast / Cloud) |
+| `litellm` | http://localhost:4000 (UI: `http://localhost:4000/ui`) – bramka LiteLLM Proxy (login UI: `admin` / `admin`) |
 | `qdrant` | http://localhost:6333/dashboard – baza wiedzy agentów |
 | `langfuse-web` | http://localhost:3000 – ślady i koszty (login: `admin@baw.local` / `baw-admin-123`) |
 

@@ -17,9 +17,9 @@ import pytest
 from pydantic import ValidationError
 
 from baw_assistant.agents.dispatcher import DispatchDecision, Intent, classify_by_rules
-from baw_assistant.agents.editor_verifier import COMPOSE_PROMPT, check_draft
-from baw_assistant.llm import create_llm
-from baw_assistant.state import Fact
+from baw_assistant.agents.editor_verifier import COMPOSE_PROMPT, check_draft, compose, editor_verifier_node
+from baw_assistant.llm import create_llm, extract_model_name, llm_label, resolve_configured_model
+from baw_assistant.state import AssistantState, Fact
 
 TEST_FACTS: list[Fact] = [
     {"id": "F1", "text": "Termin SLA sprawy REK-2026-0412 mija 21.10.2026, zostały 3 dni.", "source": "instancje", "agent": "Agent Instancji"},
@@ -298,6 +298,92 @@ def test_create_llm_factory_invalid_provider():
     """Weryfikuje, że błędy tworzenia modelu są bezpiecznie przechwytywane i nie wywalają aplikacji."""
     llm = create_llm("unsupported_provider:non_existent_model_12345")
     assert llm is None
+
+
+# ==============================================================================
+# 6. TESTY ROZWIĄZYWANIA ETYKIET I DYNAMICZNEGO WYKRYWANIA MODELI
+# ==============================================================================
+
+def test_resolve_configured_model_aliases(monkeypatch):
+    """Weryfikuje poprawne mapowanie logicznych aliasów LiteLLM Proxy na skonfigurowane modele docelowe."""
+    monkeypatch.setenv("LOCAL_MOE_MODEL", "openai/gemma-4-26b-a4b")
+    monkeypatch.setenv("LOCAL_FAST_MODEL", "openai/qwen-3b-instruct-q4")
+    monkeypatch.setenv("FALLBACK_CLOUD_MODEL", "openai/gpt-4o")
+
+    # 1. Alias MoE
+    assert resolve_configured_model("openai:baw-moe-main") == "openai:baw-moe-main (gemma-4-26b-a4b)"
+    assert resolve_configured_model("baw-moe-main") == "baw-moe-main (gemma-4-26b-a4b)"
+
+    # 2. Alias Fast / Triage
+    assert resolve_configured_model("openai:baw-fast") == "openai:baw-fast (qwen-3b-instruct-q4)"
+
+    # 3. Alias Cloud Fallback
+    assert resolve_configured_model("baw-cloud-fallback") == "baw-cloud-fallback (gpt-4o)"
+
+    # 4. Model bezpośredni
+    assert resolve_configured_model("openai:gpt-6-luna") == "openai:gpt-6-luna"
+
+    # 5. Tryb Mock
+    assert resolve_configured_model("mock") == "tryb mock (bez LLM)"
+
+
+def test_extract_model_name_from_metadata():
+    """Weryfikuje dynamiczne wydobywanie nazwy modelu z obiektów odpowiedzi LangChain."""
+    # Obiekt odpowiedzi z response_metadata (np. ChatOpenAI / LiteLLM Proxy)
+    mock_resp = MagicMock()
+    mock_resp.response_metadata = {"model_name": "openai/gemma-4-26b-a4b"}
+    assert extract_model_name(mock_resp) == "gemma-4-26b-a4b"
+
+    # Obiekt z usage_metadata
+    mock_chunk = MagicMock()
+    mock_chunk.response_metadata = {}
+    mock_chunk.usage_metadata = {"model_name": "gpt-4o"}
+    assert extract_model_name(mock_chunk) == "gpt-4o"
+
+    # Fallback do atrybutów instancji modelu
+    mock_llm = MagicMock()
+    mock_llm.model_name = "qwen-3b-instruct-q4"
+    assert extract_model_name(None, mock_llm) == "qwen-3b-instruct-q4"
+
+
+def test_editor_verifier_propagates_model_metadata():
+    """Weryfikuje, że Redaktor-Weryfikator przekazuje nazwę modelu do stanu końcowego i śladu."""
+    mock_llm = MagicMock()
+    mock_llm.model_name = "gemma-4-26b-a4b"
+    mock_resp = MagicMock()
+    mock_resp.content = (
+        "Sprawa REK-2026-0412 czeka na Protokół szkody od klienta [F3]. "
+        "Termin SLA upływa 21.10.2026 [F1]."
+    )
+    mock_resp.response_metadata = {"model_name": "openai/gemma-4-26b-a4b"}
+    mock_llm.invoke.return_value = mock_resp
+    delattr(mock_llm, "stream")
+
+    state: AssistantState = {
+        "mode": "chat",
+        "question": "Dlaczego sprawa stoi?",
+        "user_id": "u_anna",
+        "role": "pracownik",
+        "context_instance_id": "REK-2026-0412",
+        "facts": TEST_FACTS,
+        "leads": [{"agent": "Agent Instancji", "text": "Czeka na klienta", "priority": 1}],
+        "suggested_actions": [],
+        "recommendations": [],
+        "alerts": [],
+        "data": {},
+        "trace": [],
+    }
+
+    import baw_assistant.agents.editor_verifier as ev
+    orig_get_llm = ev.get_llm
+    ev.get_llm = lambda: mock_llm
+    try:
+        res = editor_verifier_node(state)
+        assert res.get("model") == "gemma-4-26b-a4b"
+        assert res["trace"][0]["model"] == "gemma-4-26b-a4b"
+        assert res["trace"][0]["details"]["model"] == "gemma-4-26b-a4b"
+    finally:
+        ev.get_llm = orig_get_llm
 
 
 @pytest.mark.skipif(

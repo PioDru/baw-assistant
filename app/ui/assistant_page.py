@@ -104,5 +104,7 @@ def render() -> None:
                     result = ask(prompt, user.id, user.role, context_id, session_id=session_id, on_token=_on_token)
 
                 response_placeholder.empty()
+        if result.get("model"):
+            st.session_state["actual_model"] = result["model"]
         history.append({"role": "assistant", "result": result})
         st.rerun()

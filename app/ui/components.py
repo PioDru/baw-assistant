@@ -99,7 +99,18 @@ def render_trace(result: dict | None) -> None:
     if not result:
         st.caption("Ślad pracy agentów pojawi się po pierwszym pytaniu.")
         return
-    st.caption(f"Czas: {result.get('latency_ms', 0) / 1000:.1f} s")
+    model_name = result.get("model")
+    if not model_name:
+        for step in reversed(result.get("trace", [])):
+            details = step.get("details", {})
+            if isinstance(details, dict) and details.get("model"):
+                model_name = details["model"]
+                break
+    time_str = f"Czas: {result.get('latency_ms', 0) / 1000:.1f} s"
+    if model_name:
+        st.caption(f"{time_str} · Model: `{model_name}`")
+    else:
+        st.caption(time_str)
     for n, step in enumerate(result.get("trace", []), 1):
         st.markdown(f"**{n}. {step['agent']}**  \n{step['summary']}")
     if result.get("decision") == "route":
