@@ -62,9 +62,14 @@ services:
     volumes:
       - ./litellm_config.yaml:/app/config.yaml:ro
     environment:
+      # Połączenie z bazą danych PostgreSQL (wymagane do działania Admin UI i logowania)
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/postgres
       # Klucz główny LiteLLM Proxy i zezwolenie na tryb deweloperski
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-local-litellm-token}
       LITELLM_DANGEROUSLY_PERMIT_WEAK_OR_UNSET_MASTER_KEY: "true"
+      # Logowanie do panelu administracyjnego LiteLLM Admin UI
+      UI_USERNAME: ${UI_USERNAME:-admin}
+      UI_PASSWORD: ${UI_PASSWORD:-admin}
       LOCAL_FAST_SERVER_URL: http://host.docker.internal:8081/v1
       LOCAL_FAST_MODEL: ${LOCAL_FAST_MODEL:-openai/qwen-3b-instruct-q4}
       LOCAL_FAST_API_KEY: ${LOCAL_FAST_API_KEY:-none}
@@ -78,6 +83,9 @@ services:
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-lf-baw-local}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-lf-baw-local}
       LANGFUSE_HOST: ${LANGFUSE_BASE_URL:-http://langfuse-web:3000}
+    depends_on:
+      postgres:
+        condition: service_healthy
     command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4", "--detailed_debug"]
     extra_hosts:
       - "host.docker.internal:host-gateway"

@@ -15,7 +15,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from .. import db, tools
-from ..llm import get_llm
+from ..llm import extract_model_name, get_fast_llm, get_llm
 from ..rbac import (can_view_instance, get_user, instance_exists, intent_allowed, visible_process_ids)
 from ..state import AssistantState
 from .common import AGENT_ANALYST, AGENT_INSTANCE, AGENT_MONITOR, elapsed_ms
@@ -115,19 +115,20 @@ def classify_by_rules(question: str, has_instance: bool) -> tuple[str, str]:
     return "out_of_scope", "reguła: brak dopasowania do zadań asystenta"
 
 
-def classify(question: str, has_instance: bool) -> tuple[str, str, str]:
-    """Zwraca (intencja, uzasadnienie, metoda)."""
-    llm = get_llm()
+def classify(question: str, has_instance: bool) -> tuple[str, str, str, str | None]:
+    """Zwraca (intencja, uzasadnienie, metoda, użyty_model)."""
+    llm = get_fast_llm() or get_llm()
     if llm is not None:
         try:
             structured = llm.with_structured_output(DispatchDecision)
             ctx = "Użytkownik ma wybraną sprawę w kontekście." if has_instance else "Brak wybranej sprawy."
             result = structured.invoke([("system", SYSTEM_PROMPT), ("user", f"{ctx}\nPytanie: {question}")])
-            return result.intent, result.reason, "LLM"
+            model_name = extract_model_name(result, llm)
+            return result.intent, result.reason, "LLM", model_name
         except Exception as exc:  # model niedostępny → reguły, aplikacja działa dalej
             log.warning("Klasyfikacja LLM nie powiodła się, używam reguł: %s", exc)
     intent, reason = classify_by_rules(question, has_instance)
-    return intent, reason, "reguły"
+    return intent, reason, "reguły", None
 
 
 def _resolve_process(question: str, params: dict, allowed: list[str]) -> str | None:
@@ -190,7 +191,7 @@ def dispatcher_node(state: AssistantState) -> AssistantState:
     match = INSTANCE_ID_RE.search(question)
     instance_id = (f"{match.group(1).upper()}-{match.group(2)}-{match.group(3)}" if match
                    else state.get("context_instance_id"))
-    intent, reason, method = classify(question, bool(instance_id))
+    intent, reason, method, disp_model = classify(question, bool(instance_id))
     decision, decision_reason, process_id, agents = "route", "", None, []
 
     if intent == "out_of_scope":
@@ -227,4 +228,5 @@ def dispatcher_node(state: AssistantState) -> AssistantState:
                f"{access[0].upper() + access[1:]} → {target}.")
     return {"intent": intent, "decision": decision, "decision_reason": decision_reason or reason,
             "instance_id": instance_id, "process_id": process_id, "agents": agents, "recipients": [],
-            "trace": [{"agent": "Dyspozytor", "summary": summary, "ms": elapsed_ms(started)}]}
+            "trace": [{"agent": "Dyspozytor", "summary": summary, "ms": elapsed_ms(started),
+                       "model": disp_model, "details": {"method": method, "model": disp_model}}]}

@@ -5,33 +5,19 @@ general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
 
 model_list:
-  # 1. Model lekki / Triage (Dyspozytor)
-  # Instancja lokalna (port 8081 / VRAM)
+  # 1. Model lekki / Triage (Dyspozytor) - wyłącznie lokalna instancja (port 8081 / VRAM)
   - model_name: baw-fast
     litellm_params:
       model: os.environ/LOCAL_FAST_MODEL
       api_base: os.environ/LOCAL_FAST_SERVER_URL
       api_key: os.environ/LOCAL_FAST_API_KEY
-  # Instancja chmurowa (zapasowa pod tą samą nazwą logiczną)
-  - model_name: baw-fast
-    litellm_params:
-      model: os.environ/FALLBACK_CLOUD_MODEL
-      api_base: os.environ/OPENAI_BASE_URL
-      api_key: os.environ/OPENAI_API_KEY
 
-  # 2. Główny model MoE (Instancja, Analityk, Redaktor, Monitor)
-  # Instancja lokalna (port 8082 / VRAM + RAM)
+  # 2. Główny model MoE (Instancja, Analityk, Redaktor, Monitor) - wyłącznie lokalna instancja (port 8082 / VRAM + RAM)
   - model_name: baw-moe-main
     litellm_params:
       model: os.environ/LOCAL_MOE_MODEL
       api_base: os.environ/LOCAL_MOE_SERVER_URL
       api_key: os.environ/LOCAL_MOE_API_KEY
-  # Instancja chmurowa (zapasowa pod tą samą nazwą logiczną)
-  - model_name: baw-moe-main
-    litellm_params:
-      model: os.environ/FALLBACK_CLOUD_MODEL
-      api_base: os.environ/OPENAI_BASE_URL
-      api_key: os.environ/OPENAI_API_KEY
 
   # 3. Model chmurowy (Awaryjny / Bezpośredni)
   - model_name: baw-cloud-fallback
@@ -47,8 +33,8 @@ router_settings:
   allowed_fails: 1
   cooldown_time: 86400
   fallbacks:
+    - baw-fast: ["baw-cloud-fallback"]
     - baw-moe-main: ["baw-cloud-fallback"]
-    - baw-fast: ["baw-moe-main", "baw-cloud-fallback"]
 
 # --- Konfiguracja rejestrowania zdarzeń i telemetrii ---
 litellm_settings:

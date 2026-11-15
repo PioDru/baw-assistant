@@ -8,6 +8,7 @@ Gdy modelu nie da się utworzyć (np. brak klucza API), agenci przechodzą na re
 from __future__ import annotations
 
 import logging
+import os
 from functools import lru_cache
 from typing import Any
 
@@ -58,13 +59,73 @@ def get_llm() -> Any | None:
     return create_llm()
 
 
+@lru_cache(maxsize=1)
+def get_fast_llm() -> Any | None:
+    """Zwraca lekki model (np. openai:baw-fast) dedykowany dla zadań triage i klasyfikacji."""
+    settings = get_settings()
+    if settings.mock_llm:
+        return None
+    return create_llm(model="openai:baw-fast") or get_llm()
+
+
+def resolve_configured_model(model_name: str | None = None) -> str:
+    """Zwraca czytelną nazwę skonfigurowanego modelu z rozwinięciem logicznych aliasów bramki LiteLLM."""
+    settings = get_settings()
+    target = model_name or settings.llm_model
+    if target.lower() in ("mock", "mock:rules"):
+        return "tryb mock (bez LLM)"
+
+    local_moe = (settings.local_moe_model or os.getenv("LOCAL_MOE_MODEL", "")).replace("openai/", "").replace("openai:", "")
+    local_fast = (settings.local_fast_model or os.getenv("LOCAL_FAST_MODEL", "")).replace("openai/", "").replace("openai:", "")
+    fallback = (settings.fallback_cloud_model or os.getenv("FALLBACK_CLOUD_MODEL", "")).replace("openai/", "").replace("openai:", "")
+
+    if "baw-moe-main" in target:
+        details = local_moe or fallback
+        return f"{target} ({details})" if details else target
+    if "baw-fast" in target:
+        details = local_fast or fallback
+        return f"{target} ({details})" if details else target
+    if "baw-cloud-fallback" in target:
+        return f"{target} ({fallback})" if fallback else target
+
+    return target
+
+
+def extract_model_name(obj: Any, llm_instance: Any = None) -> str | None:
+    """Wydobywa rzeczywistą nazwę modelu z metadanych odpowiedzi LangChain / LiteLLM."""
+    if obj is not None:
+        response_meta = getattr(obj, "response_metadata", None)
+        if isinstance(response_meta, dict):
+            model = response_meta.get("model_name") or response_meta.get("model")
+            if model:
+                return str(model).replace("openai/", "").replace("openai:", "")
+        usage_meta = getattr(obj, "usage_metadata", None)
+        if isinstance(usage_meta, dict):
+            model = usage_meta.get("model_name") or usage_meta.get("model")
+            if model:
+                return str(model).replace("openai/", "").replace("openai:", "")
+        add_kwargs = getattr(obj, "additional_kwargs", None)
+        if isinstance(add_kwargs, dict):
+            model = add_kwargs.get("model") or add_kwargs.get("model_name")
+            if model:
+                return str(model).replace("openai/", "").replace("openai:", "")
+
+    if llm_instance is not None:
+        model = getattr(llm_instance, "model_name", None) or getattr(llm_instance, "model", None)
+        if model:
+            return str(model).replace("openai/", "").replace("openai:", "")
+
+    return None
+
+
 def llm_label() -> str:
     settings = get_settings()
     if settings.mock_llm:
         return "tryb mock (bez LLM)"
+    resolved = resolve_configured_model(settings.llm_model)
     if get_llm() is None:
-        return f"{settings.llm_model} – niedostępny, tryb reguł"
-    return settings.llm_model
+        return f"{resolved} – niedostępny, tryb reguł"
+    return resolved
 
 
 def llm_error() -> str | None:
