@@ -6,6 +6,7 @@ import streamlit as st
 from baw_assistant import analytics
 from baw_assistant.db import query
 from baw_assistant.graph import ask
+from baw_assistant.pdf_report import generate_analytics_pdf
 from baw_assistant.rbac import User, visible_process_ids
 from ui.components import render_answer, steps_chart, weekly_chart
 
@@ -56,5 +57,22 @@ def render() -> None:
             st.subheader("Raport AI")
             result = st.session_state[key]
             render_answer({**result, "data": {}}, f"report_{user.id}", user, None)
-            st.download_button("Pobierz raport (Markdown)", result.get("answer", "").encode("utf-8"),
-                               f"raport_{proc['id']}.md", "text/markdown")
+            md_text = result.get("answer", "")
+            pdf_bytes = generate_analytics_pdf(proc["name"], period_label, md_text)
+            col_md, col_pdf = st.columns(2)
+            with col_md:
+                st.download_button(
+                    "Pobierz raport (Markdown)",
+                    md_text.encode("utf-8"),
+                    f"raport_{proc['id']}.md",
+                    "text/markdown",
+                    width="stretch",
+                )
+            with col_pdf:
+                st.download_button(
+                    "Pobierz raport (PDF)",
+                    pdf_bytes,
+                    f"raport_{proc['id']}.pdf",
+                    "application/pdf",
+                    width="stretch",
+                )
